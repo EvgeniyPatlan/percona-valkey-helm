@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+  {{- with .Values.image.pullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.securityContext | nindent 4 }}
+  containers:
+    - name: test
+      image: {{ include "percona-valkey.rpmImage" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        {{- toYaml .Values.containerSecurityContext | nindent 8 }}
+      env:
+        {{- if .Values.auth.enabled }}
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "percona-valkey.secretName" . }}
+              key: valkey-password
+        {{- end }}
+      command:
+        - sh
+        - -c
+        - |
+          {{- if .Values.auth.enabled }}
+          valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} -a "$VALKEY_PASSWORD" ping | grep -q PONG
+          {{- else }}
+          valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} ping | grep -q PONG
+          {{- end }}
+  restartPolicy: Never

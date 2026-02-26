@@ -1,0 +1,18 @@
+{{- if and .Values.pdb.enabled (eq .Values.mode "cluster") }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "percona-valkey.selectorLabels" . | nindent 6 }}
+{{- end }}

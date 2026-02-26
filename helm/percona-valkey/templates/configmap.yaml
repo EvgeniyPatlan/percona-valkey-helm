@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+data:
+  valkey.conf: |
+    protected-mode no
+    port 6379
+    dir /data
+    {{- if .Values.config.bind }}
+    bind {{ .Values.config.bind }}
+    {{- end }}
+    {{- if .Values.config.maxmemory }}
+    maxmemory {{ .Values.config.maxmemory }}
+    {{- end }}
+    {{- if .Values.config.maxmemoryPolicy }}
+    maxmemory-policy {{ .Values.config.maxmemoryPolicy }}
+    {{- end }}
+    # RDB persistence
+    save 3600 1 300 100 60 10000
+    dbfilename dump.rdb
+    # AOF persistence
+    appendonly yes
+    appendfilename "appendonly.aof"
+    {{- if eq .Values.mode "cluster" }}
+    # Cluster settings
+    cluster-enabled yes
+    cluster-config-file /data/nodes.conf
+    cluster-node-timeout {{ .Values.cluster.nodeTimeout }}
+    {{- end }}
+    {{- if .Values.config.customConfig }}
+    # Custom configuration
+    {{ .Values.config.customConfig | nindent 4 }}
+    {{- end }}

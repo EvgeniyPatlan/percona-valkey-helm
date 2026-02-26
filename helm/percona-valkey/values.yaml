@@ -1,0 +1,137 @@
+## @section Global parameters
+nameOverride: ""
+fullnameOverride: ""
+
+## @section Deployment mode
+## "standalone" or "cluster"
+mode: standalone
+
+## @section Image configuration
+image:
+  repository: perconalab/valkey
+  ## Image variant: "rpm" (UBI9) or "hardened" (DHI)
+  variant: rpm
+  ## Overrides the image tag (default: appVersion for rpm, appVersion-hardened for hardened)
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+## @section Authentication
+auth:
+  enabled: true
+  ## Valkey password (auto-generated if empty)
+  password: ""
+  ## Use existing Secret (key: valkey-password)
+  existingSecret: ""
+
+## @section Valkey configuration
+config:
+  maxmemory: ""
+  maxmemoryPolicy: ""
+  bind: "0.0.0.0"
+  ## Additional flags passed via VALKEY_EXTRA_FLAGS env var
+  extraFlags: ""
+  ## Custom valkey.conf content appended to generated config
+  customConfig: ""
+
+## @section Cluster mode settings
+cluster:
+  replicas: 6
+  replicasPerPrimary: 1
+  nodeTimeout: 15000
+  busPort: 16379
+
+## @section Standalone mode settings
+standalone:
+  replicas: 1
+
+## @section StatefulSet parameters
+statefulset:
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: ""
+  annotations: {}
+  labels: {}
+
+## @section Pod parameters
+podAnnotations: {}
+podLabels: {}
+
+## @section Security context
+securityContext:
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  runAsNonRoot: true
+
+containerSecurityContext:
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+## @section Service parameters
+service:
+  type: ClusterIP
+  port: 6379
+  annotations: {}
+
+## @section Persistence
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 8Gi
+  annotations: {}
+
+## @section Health probes
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+## @section Resources
+resources:
+  limits: {}
+  requests: {}
+
+## @section ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+## @section RBAC
+rbac:
+  create: true
+
+## @section PodDisruptionBudget (cluster mode only)
+pdb:
+  enabled: true
+  minAvailable: ""
+  maxUnavailable: 1
+
+## @section Node placement
+nodeSelector: {}
+tolerations: []
+affinity: {}

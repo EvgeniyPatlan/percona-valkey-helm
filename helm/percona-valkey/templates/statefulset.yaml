@@ -1,0 +1,228 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+  {{- with .Values.statefulset.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ include "percona-valkey.replicaCount" . }}
+  serviceName: {{ include "percona-valkey.fullname" . }}-headless
+  podManagementPolicy: {{ include "percona-valkey.podManagementPolicy" . }}
+  {{- with .Values.statefulset.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "percona-valkey.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "percona-valkey.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.statefulset.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: valkey
+          image: {{ include "percona-valkey.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- if eq .Values.image.variant "hardened" }}
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            {{- else }}
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: valkey
+              containerPort: 6379
+              protocol: TCP
+            {{- if eq .Values.mode "cluster" }}
+            - name: cluster-bus
+              containerPort: {{ .Values.cluster.busPort }}
+              protocol: TCP
+            {{- end }}
+          args:
+            - /etc/valkey/valkey.conf
+          env:
+            {{- if .Values.auth.enabled }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+            {{- if .Values.config.maxmemory }}
+            - name: VALKEY_MAXMEMORY
+              value: {{ .Values.config.maxmemory | quote }}
+            {{- end }}
+            {{- if .Values.config.bind }}
+            - name: VALKEY_BIND
+              value: {{ .Values.config.bind | quote }}
+            {{- end }}
+            {{- if eq .Values.mode "cluster" }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VALKEY_EXTRA_FLAGS
+              value: "{{ .Values.config.extraFlags }} --cluster-announce-ip $(POD_IP)"
+            {{- else if .Values.config.extraFlags }}
+            - name: VALKEY_EXTRA_FLAGS
+              value: {{ .Values.config.extraFlags | quote }}
+            {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- if eq .Values.mode "cluster" }}
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            {{- else }}
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.livenessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if and (eq .Values.mode "cluster") .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" cluster info | grep -q "cluster_state:ok"
+                  {{- else if eq .Values.mode "cluster" }}
+                  valkey-cli cluster info | grep -q "cluster_state:ok"
+                  {{- else if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.readinessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if .Values.auth.enabled }}
+                  valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG
+                  {{- else }}
+                  valkey-cli ping | grep -q PONG
+                  {{- end }}
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/valkey
+            {{- if eq .Values.image.variant "hardened" }}
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run/valkey
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "percona-valkey.fullname" . }}
+        {{- if eq .Values.image.variant "hardened" }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+        - name: run
+          emptyDir:
+            medium: Memory
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

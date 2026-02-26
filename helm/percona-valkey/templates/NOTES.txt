@@ -1,0 +1,28 @@
+Percona Valkey has been deployed in {{ .Values.mode }} mode.
+
+{{- $fullname := include "percona-valkey.fullname" . }}
+
+{{- if eq .Values.mode "cluster" }}
+
+Cluster mode: {{ .Values.cluster.replicas }} nodes with {{ .Values.cluster.replicasPerPrimary }} replica(s) per primary.
+The cluster-init job will automatically form the cluster after all pods are ready.
+
+To check cluster status:
+  kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-0 -- valkey-cli {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}cluster info
+
+{{- else }}
+
+To connect to Valkey:
+
+{{- end }}
+
+  export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.clusterIP}')
+  {{- if .Values.auth.enabled }}
+  export VALKEY_PASSWORD=$(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d)
+  valkey-cli -h $SERVICE_IP -p {{ .Values.service.port }} -a $VALKEY_PASSWORD
+  {{- else }}
+  valkey-cli -h $SERVICE_IP -p {{ .Values.service.port }}
+  {{- end }}
+
+To run the connection test:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

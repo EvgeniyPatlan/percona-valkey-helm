@@ -1,0 +1,22 @@
+apiVersion: v2
+name: percona-valkey
+description: Percona Valkey - high-performance key-value store for Kubernetes
+type: application
+version: 0.1.0
+appVersion: "9.0.3"
+home: https://www.percona.com/software/percona-valkey
+sources:
+  - https://github.com/EvgeniyPatlan/valkey-packaging
+  - https://github.com/valkey-io/valkey
+maintainers:
+  - name: Percona
+    email: info@percona.com
+    url: https://www.percona.com
+keywords:
+  - valkey
+  - cache
+  - key-value
+  - percona
+  - database
+annotations:
+  category: Database

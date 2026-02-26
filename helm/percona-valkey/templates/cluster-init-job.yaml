@@ -1,0 +1,96 @@
+{{- if eq .Values.mode "cluster" }}
+{{- $fullname := include "percona-valkey.fullname" . -}}
+{{- $replicas := int .Values.cluster.replicas -}}
+{{- $replicasPerPrimary := int .Values.cluster.replicasPerPrimary -}}
+{{- $port := int .Values.service.port -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-cluster-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "percona-valkey.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cluster-init
+    spec:
+      serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      restartPolicy: OnFailure
+      containers:
+        - name: cluster-init
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- if .Values.auth.enabled }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+              REPLICAS={{ $replicas }}
+              PORT={{ $port }}
+              REPLICAS_PER_PRIMARY={{ $replicasPerPrimary }}
+
+              {{- if .Values.auth.enabled }}
+              AUTH_FLAG="-a $VALKEY_PASSWORD"
+              {{- else }}
+              AUTH_FLAG=""
+              {{- end }}
+
+              echo "Waiting for all $REPLICAS pods to be reachable..."
+              for i in $(seq 0 $(( REPLICAS - 1 ))); do
+                HOST="{{ $fullname }}-${i}.${HEADLESS}"
+                echo "  Waiting for ${HOST}:${PORT}..."
+                until valkey-cli -h "$HOST" -p "$PORT" $AUTH_FLAG ping 2>/dev/null | grep -q PONG; do
+                  sleep 2
+                done
+                echo "  ${HOST} is ready."
+              done
+
+              # Check if cluster is already formed (idempotency)
+              FIRST_HOST="{{ $fullname }}-0.${HEADLESS}"
+              CLUSTER_STATE=$(valkey-cli -h "$FIRST_HOST" -p "$PORT" $AUTH_FLAG cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+              if [ "$CLUSTER_STATE" = "cluster_state:ok" ]; then
+                echo "Cluster is already formed. Skipping initialization."
+                exit 0
+              fi
+
+              # Build node list
+              NODES=""
+              for i in $(seq 0 $(( REPLICAS - 1 ))); do
+                HOST="{{ $fullname }}-${i}.${HEADLESS}"
+                NODES="${NODES} ${HOST}:${PORT}"
+              done
+
+              echo "Creating Valkey cluster with nodes:${NODES}"
+              valkey-cli --cluster create $AUTH_FLAG \
+                --cluster-replicas $REPLICAS_PER_PRIMARY \
+                --cluster-yes \
+                $NODES
+
+              echo "Cluster initialization complete."
+{{- end }}
