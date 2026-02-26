@@ -131,6 +131,56 @@ pdb:
   minAvailable: ""
   maxUnavailable: 1
 
+## @section Disable dangerous commands
+## Commands listed here are renamed to "" (disabled) in valkey.conf
+disableCommands:
+  - FLUSHDB
+  - FLUSHALL
+
+## @section Network Policy
+networkPolicy:
+  enabled: false
+  ## Allow connections from outside the cluster
+  allowExternal: true
+  ## Additional ingress rules
+  extraIngress: []
+  ## Additional egress rules
+  extraEgress: []
+
+## @section Init containers
+## sysctl tuning (requires privileged init container)
+sysctlInit:
+  enabled: false
+  somaxconn: 512
+  disableTHP: true
+  resources: {}
+
+## Fix volume permissions for PVC (runs as root)
+volumePermissions:
+  enabled: false
+  resources: {}
+
+## @section Metrics (Prometheus exporter)
+metrics:
+  enabled: false
+  image:
+    repository: oliver006/redis_exporter
+    tag: v1.67.0
+    pullPolicy: IfNotPresent
+  port: 9121
+  resources: {}
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: ""
+    labels: {}
+  podMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    labels: {}
+
 ## @section Node placement
 nodeSelector: {}
 tolerations: []

@@ -31,6 +31,12 @@ data:
     cluster-config-file /data/nodes.conf
     cluster-node-timeout {{ .Values.cluster.nodeTimeout }}
     {{- end }}
+    {{- if .Values.disableCommands }}
+    # Disabled commands
+    {{- range .Values.disableCommands }}
+    rename-command {{ . }} ""
+    {{- end }}
+    {{- end }}
     {{- if .Values.config.customConfig }}
     # Custom configuration
     {{ .Values.config.customConfig | nindent 4 }}

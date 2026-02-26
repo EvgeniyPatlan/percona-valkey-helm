@@ -482,9 +482,9 @@ Pod annotations include `checksum/config` computed from the ConfigMap content. W
 
 ## Known Limitations
 
-1. **Cluster-init Job runs only on initial install**: The `cluster-init-job.yaml` is a Helm `post-install` hook, not `post-upgrade`. Scaling the cluster up after the initial install requires manual node addition.
+1. **Aggressive scale-down can cause data loss**: When scaling down, Valkey relies on automatic failover to promote replicas of terminated primaries. If both a primary and all its replicas are removed simultaneously, the hash slots owned by that shard are lost. Always ensure enough replicas survive — scale in steps of `(1 + replicasPerPrimary)` and verify `cluster nodes` between steps.
 
-2. **Hardened image uses RPM image for Jobs**: The cluster-init Job and helm test pod always use the RPM image variant (`percona-valkey.rpmImage`), because they need shell utilities (`sh`, `grep`, `valkey-cli`) that are not available in the distroless hardened image.
+2. **Hardened image uses RPM image for Jobs**: The cluster-init Job, cluster-scale Job, and helm test pod always use the RPM image variant (`percona-valkey.rpmImage`), because they need shell utilities (`sh`, `grep`, `valkey-cli`) that are not available in the distroless hardened image.
 
 3. **Password rotation requires pod restart**: Changing `auth.password` or the referenced Secret updates the Secret object, but running pods must be restarted to pick up the new password (the entrypoint reads it at startup). Use `kubectl rollout restart statefulset/<release>-percona-valkey`.
 
@@ -492,7 +492,7 @@ Pod annotations include `checksum/config` computed from the ConfigMap content. W
 
 5. **No TLS support**: TLS termination is not configured in this chart version. Use a service mesh (Istio, Linkerd) or add TLS configuration via `config.customConfig` and volume-mounted certificates.
 
-6. **Auto-generated passwords change on upgrade**: If `auth.password` is left empty, Helm generates a random password on each `helm template` / `helm upgrade`. To avoid this, either set an explicit password or use `auth.existingSecret` to manage the Secret outside of Helm.
+6. **Auto-generated passwords and `helm template`**: Auto-generated passwords are preserved across `helm upgrade` (the chart looks up the existing Secret). However, `helm template` always generates a new random password since it cannot access the cluster. Use `auth.password` or `auth.existingSecret` if you need deterministic output.
 
 7. **Single-namespace deployment**: All resources are deployed into the release namespace. Cross-namespace cluster topologies are not supported.
 
