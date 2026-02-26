@@ -31,9 +31,15 @@ data:
     cluster-config-file /data/nodes.conf
     cluster-node-timeout {{ .Values.cluster.nodeTimeout }}
     {{- end }}
-    {{- if .Values.disableCommands }}
+    {{- $cmds := .Values.disableCommands }}
+    {{- if and (eq .Values.mode "standalone") .Values.disableCommandsStandalone }}
+    {{- $cmds = .Values.disableCommandsStandalone }}
+    {{- else if and (eq .Values.mode "cluster") .Values.disableCommandsCluster }}
+    {{- $cmds = .Values.disableCommandsCluster }}
+    {{- end }}
+    {{- if $cmds }}
     # Disabled commands
-    {{- range .Values.disableCommands }}
+    {{- range $cmds }}
     rename-command {{ . }} ""
     {{- end }}
     {{- end }}

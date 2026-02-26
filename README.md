@@ -20,6 +20,7 @@ helm/percona-valkey/
     ├── statefulset.yaml               # Core workload (standalone or cluster)
     ├── pdb.yaml                       # PodDisruptionBudget (cluster mode only)
     ├── cluster-init-job.yaml          # Helm post-install hook: cluster formation
+    ├── cluster-scale-job.yaml         # Helm post-upgrade hook: scale up/down
     └── tests/
         └── test-connection.yaml       # helm test: valkey-cli ping
 ```
@@ -434,6 +435,109 @@ helm upgrade my-valkey ./helm/percona-valkey -f my-values.yaml
 ```
 
 The StatefulSet includes a `checksum/config` annotation on pods, so ConfigMap changes trigger a rolling restart automatically.
+
+### Scale cluster up
+
+Increase the replica count and run `helm upgrade`. The `post-upgrade` hook Job automatically:
+1. Detects new pods that are not yet part of the cluster
+2. Adds them with `valkey-cli --cluster add-node`
+3. Converts excess masters to replicas (maintains the `replicasPerPrimary` ratio)
+4. Rebalances hash slots across all masters
+
+```bash
+# 1. Check current state before scaling
+kubectl get pods -l app.kubernetes.io/instance=my-valkey
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster info
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster nodes
+
+# 2. Scale from 6 to 8 nodes
+helm upgrade my-valkey ./helm/percona-valkey \
+  --set mode=cluster \
+  --set cluster.replicas=8 \
+  --set auth.password=<your-password>
+
+# 3. Watch new pods come up
+kubectl get pods -l app.kubernetes.io/instance=my-valkey -w
+
+# 4. Monitor the scale job (auto-deleted on success)
+kubectl logs -f job/my-valkey-percona-valkey-cluster-scale
+
+# 5. Verify all pods are Ready
+kubectl get pods -l app.kubernetes.io/instance=my-valkey
+#    Expected: 8/8 pods Running, all 1/1 Ready
+
+# 6. Verify cluster absorbed the new nodes
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster info
+#    Expected: cluster_state:ok, cluster_known_nodes:8
+
+# 7. Verify node roles and slot distribution
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster nodes
+#    Expected: 4 masters with ~4096 slots each, 4 replicas
+
+# 8. Test data operations still work
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> -c set scale-test "ok"
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> -c get scale-test
+#    Expected: "ok"
+
+# 9. Run helm test to confirm connectivity
+helm test my-valkey
+```
+
+**Important:** Always scale in multiples of `(1 + replicasPerPrimary)` for balanced distribution. For example, with `replicasPerPrimary: 1`, scale in steps of 2 (6 -> 8 -> 10).
+
+### Scale cluster down
+
+Reduce the replica count and run `helm upgrade`. The `post-upgrade` hook Job automatically:
+1. Waits for Valkey's automatic failover (replicas of terminated primaries get promoted)
+2. Runs `--cluster fix` if any slots remain on dead nodes
+3. Removes dead nodes from the cluster via `cluster forget`
+4. Rebalances remaining slots
+
+```bash
+# 1. Check current state — note which nodes are primaries vs replicas
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster nodes
+#    Identify which high-index pods (to be removed) are primaries vs replicas.
+#    Ensure no primary being removed has ALL its replicas also being removed.
+
+# 2. Write test data before scaling down
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> -c set before-scaledown "preserved"
+
+# 3. Scale from 8 to 6 nodes
+helm upgrade my-valkey ./helm/percona-valkey \
+  --set mode=cluster \
+  --set cluster.replicas=6 \
+  --set auth.password=<your-password>
+
+# 4. Watch pods 6 and 7 terminate
+kubectl get pods -l app.kubernetes.io/instance=my-valkey -w
+
+# 5. Monitor the scale job — it waits for failover before cleanup
+kubectl logs -f job/my-valkey-percona-valkey-cluster-scale
+
+# 6. Verify only 6 pods remain and all are Ready
+kubectl get pods -l app.kubernetes.io/instance=my-valkey
+#    Expected: 6 pods, all 1/1 Ready
+
+# 7. Verify cluster health — dead nodes should be gone
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster info
+#    Expected: cluster_state:ok, cluster_known_nodes:6, cluster_slots_ok:16384
+
+# 8. Verify no failed nodes remain in cluster view
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> cluster nodes
+#    Expected: 3 masters + 3 replicas, no "fail" entries
+
+# 9. Verify data survived the scale-down
+kubectl exec my-valkey-percona-valkey-0 -- valkey-cli -a <password> -c get before-scaledown
+#    Expected: "preserved"
+
+# 10. Run helm test
+helm test my-valkey
+
+# 11. Clean up orphaned PVCs from removed pods
+kubectl delete pvc data-my-valkey-percona-valkey-6 data-my-valkey-percona-valkey-7
+```
+
+**Warning:** When scaling down, ensure that every primary being removed has at least one replica that will survive. Losing both a primary and all its replicas causes data loss for that shard's hash slots.
 
 ### Uninstall
 

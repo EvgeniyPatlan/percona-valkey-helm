@@ -23,6 +23,10 @@ auth:
   password: ""
   ## Use existing Secret (key: valkey-password)
   existingSecret: ""
+  ## Mount password as file instead of env var (more secure)
+  usePasswordFiles: false
+  ## Directory where password file is mounted
+  passwordFilePath: /opt/valkey/secrets
 
 ## @section Valkey configuration
 config:
@@ -120,6 +124,7 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}
+  automountServiceAccountToken: false
 
 ## @section RBAC
 rbac:
@@ -136,6 +141,9 @@ pdb:
 disableCommands:
   - FLUSHDB
   - FLUSHALL
+## Per-mode overrides (optional). If set, these replace disableCommands for that mode.
+# disableCommandsStandalone: []
+# disableCommandsCluster: []
 
 ## @section Network Policy
 networkPolicy:
@@ -180,6 +188,64 @@ metrics:
     namespace: ""
     interval: 30s
     labels: {}
+  prometheusRule:
+    enabled: false
+    namespace: ""
+    labels: {}
+    ## Example rules:
+    # rules:
+    #   - alert: ValkeyDown
+    #     expr: redis_up == 0
+    #     for: 5m
+    #     labels:
+    #       severity: critical
+    #     annotations:
+    #       summary: "Valkey instance {{ $labels.instance }} is down"
+    rules: []
+
+## @section Lifecycle hooks
+lifecycle: {}
+  # postStart:
+  #   exec:
+  #     command: ["/bin/sh", "-c", "echo started"]
+  # preStop:
+  #   exec:
+  #     command: ["/bin/sh", "-c", "valkey-cli shutdown save"]
+
+## @section Diagnostic mode (overrides entrypoint for debugging)
+diagnosticMode:
+  enabled: false
+  command:
+    - sleep
+  args:
+    - infinity
+
+## @section Extra resources
+## Additional volumes to mount on the StatefulSet
+extraVolumes: []
+## Additional volume mounts for the valkey container
+extraVolumeMounts: []
+## Additional env vars for the valkey container
+extraEnvVars: []
+
+## @section Resource presets
+## Predefined resource configurations. Overridden by explicit resources.limits/requests.
+## Options: none, nano, micro, small, medium, large, xlarge
+resourcePreset: none
+
+## @section Image verification
+imageVerification:
+  ## Fail if image does not match expected repository prefix
+  enabled: false
+  allowedRepositories:
+    - perconalab/valkey
+    - percona/valkey
+
+## @section Persistence
+## PVC retention policy (requires Kubernetes 1.27+)
+persistentVolumeClaimRetentionPolicy:
+  whenDeleted: Retain
+  whenScaled: Retain
 
 ## @section Node placement
 nodeSelector: {}

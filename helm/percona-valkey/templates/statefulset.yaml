@@ -122,15 +122,25 @@ spec:
               containerPort: {{ .Values.cluster.busPort }}
               protocol: TCP
             {{- end }}
+          {{- if .Values.diagnosticMode.enabled }}
+          command: {{- toYaml .Values.diagnosticMode.command | nindent 12 }}
+          args: {{- toYaml .Values.diagnosticMode.args | nindent 12 }}
+          {{- else }}
           args:
             - /etc/valkey/valkey.conf
+          {{- end }}
           env:
             {{- if .Values.auth.enabled }}
+            {{- if .Values.auth.usePasswordFiles }}
+            - name: VALKEY_PASSWORD_FILE
+              value: {{ .Values.auth.passwordFilePath }}/valkey-password
+            {{- else }}
             - name: VALKEY_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "percona-valkey.secretName" . }}
                   key: valkey-password
+            {{- end }}
             {{- end }}
             {{- if .Values.config.maxmemory }}
             - name: VALKEY_MAXMEMORY
@@ -151,6 +161,13 @@ spec:
             - name: VALKEY_EXTRA_FLAGS
               value: {{ .Values.config.extraFlags | quote }}
             {{- end }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
             {{- if eq .Values.mode "cluster" }}
@@ -221,20 +238,29 @@ spec:
             timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           {{- end }}
-          {{- with .Values.resources }}
+          {{- $res := include "percona-valkey.resources" . }}
+          {{- if $res }}
           resources:
-            {{- toYaml . | nindent 12 }}
+            {{- $res | nindent 12 }}
           {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
             - name: config
               mountPath: /etc/valkey
+            {{- if and .Values.auth.enabled .Values.auth.usePasswordFiles }}
+            - name: valkey-password
+              mountPath: {{ .Values.auth.passwordFilePath }}
+              readOnly: true
+            {{- end }}
             {{- if eq .Values.image.variant "hardened" }}
             - name: tmp
               mountPath: /tmp
             - name: run
               mountPath: /run/valkey
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if .Values.metrics.enabled }}
         - name: metrics
@@ -270,6 +296,17 @@ spec:
         - name: config
           configMap:
             name: {{ include "percona-valkey.fullname" . }}
+        {{- if and .Values.auth.enabled .Values.auth.usePasswordFiles }}
+        - name: valkey-password
+          secret:
+            secretName: {{ include "percona-valkey.secretName" . }}
+            items:
+              - key: valkey-password
+                path: valkey-password
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- if eq .Values.image.variant "hardened" }}
         - name: tmp
           emptyDir:
@@ -282,6 +319,10 @@ spec:
         - name: data
           emptyDir: {}
         {{- end }}
+  {{- if .Values.persistentVolumeClaimRetentionPolicy }}
+  persistentVolumeClaimRetentionPolicy:
+    {{- toYaml .Values.persistentVolumeClaimRetentionPolicy | nindent 4 }}
+  {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

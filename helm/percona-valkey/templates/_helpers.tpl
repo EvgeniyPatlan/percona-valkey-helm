@@ -106,6 +106,67 @@ Replica count based on mode.
 {{- end }}
 
 {{/*
+Resource presets. Returns resources dict based on preset name.
+Explicit resources.limits/requests always override presets.
+*/}}
+{{- define "percona-valkey.resourcePreset" -}}
+{{- if eq .Values.resourcePreset "nano" }}
+requests:
+  cpu: 100m
+  memory: 128Mi
+limits:
+  cpu: 250m
+  memory: 256Mi
+{{- else if eq .Values.resourcePreset "micro" }}
+requests:
+  cpu: 250m
+  memory: 256Mi
+limits:
+  cpu: 500m
+  memory: 512Mi
+{{- else if eq .Values.resourcePreset "small" }}
+requests:
+  cpu: 500m
+  memory: 512Mi
+limits:
+  cpu: "1"
+  memory: 1Gi
+{{- else if eq .Values.resourcePreset "medium" }}
+requests:
+  cpu: "1"
+  memory: 1Gi
+limits:
+  cpu: "2"
+  memory: 2Gi
+{{- else if eq .Values.resourcePreset "large" }}
+requests:
+  cpu: "2"
+  memory: 2Gi
+limits:
+  cpu: "4"
+  memory: 4Gi
+{{- else if eq .Values.resourcePreset "xlarge" }}
+requests:
+  cpu: "4"
+  memory: 4Gi
+limits:
+  cpu: "8"
+  memory: 8Gi
+{{- end }}
+{{- end }}
+
+{{/*
+Resolve effective resources: explicit values override preset.
+*/}}
+{{- define "percona-valkey.resources" -}}
+{{- if or .Values.resources.limits .Values.resources.requests }}
+{{- toYaml .Values.resources }}
+{{- else }}
+{{- include "percona-valkey.resourcePreset" . }}
+{{- end }}
+{{- end }}
+
+{{/*
 Pod management policy based on mode.
 */}}
 {{- define "percona-valkey.podManagementPolicy" -}}
