@@ -1,6 +1,6 @@
 # Percona Valkey Helm Chart
 
-A production-ready Helm chart for deploying [Percona Valkey](https://www.percona.com/software/percona-valkey) on Kubernetes. Supports both **standalone** and **native Valkey Cluster** modes with two image variants: RPM-based (UBI9) and Hardened (DHI).
+A production-ready Helm chart for deploying Percona Valkey on Kubernetes. Supports both **standalone** and **native Valkey Cluster** modes with two image variants: RPM-based (UBI9) and Hardened (DHI).
 
 ## Chart Structure
 
