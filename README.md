@@ -9,7 +9,6 @@ helm/percona-valkey/
 ├── Chart.yaml                         # Chart metadata (appVersion: 9.0.3)
 ├── values.yaml                        # All configurable parameters
 ├── .helmignore                        # Files excluded from chart packaging
-├── README.md                          # This file
 └── templates/
     ├── _helpers.tpl                   # Template helpers (names, labels, image resolution)
     ├── NOTES.txt                      # Post-install connection instructions
