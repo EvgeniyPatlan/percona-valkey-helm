@@ -35,8 +35,9 @@ spec:
         - -c
         - |
           {{- if .Values.auth.enabled }}
-          valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} -a "$VALKEY_PASSWORD" ping | grep -q PONG
+          response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} -a "$VALKEY_PASSWORD" ping)
           {{- else }}
-          valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} ping | grep -q PONG
+          response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} ping)
           {{- end }}
+          [ "$response" = "PONG" ]
   restartPolicy: Never

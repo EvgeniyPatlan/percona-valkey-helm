@@ -126,10 +126,6 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 
-## @section RBAC
-rbac:
-  create: true
-
 ## @section PodDisruptionBudget (cluster mode only)
 pdb:
   enabled: true
@@ -232,14 +228,6 @@ extraEnvVars: []
 ## Predefined resource configurations. Overridden by explicit resources.limits/requests.
 ## Options: none, nano, micro, small, medium, large, xlarge
 resourcePreset: none
-
-## @section Image verification
-imageVerification:
-  ## Fail if image does not match expected repository prefix
-  enabled: false
-  allowedRepositories:
-    - perconalab/valkey
-    - percona/valkey
 
 ## @section Persistence
 ## PVC retention policy (requires Kubernetes 1.27+)

@@ -18,5 +18,6 @@ keywords:
   - key-value
   - percona
   - database
+icon: https://www.percona.com/favicon.ico
 annotations:
   category: Database
