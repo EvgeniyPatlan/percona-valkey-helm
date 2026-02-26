@@ -1,0 +1,247 @@
+{{- if eq .Values.mode "cluster" }}
+{{- $fullname := include "percona-valkey.fullname" . -}}
+{{- $replicas := int .Values.cluster.replicas -}}
+{{- $replicasPerPrimary := int .Values.cluster.replicasPerPrimary -}}
+{{- $port := int .Values.service.port -}}
+{{- $nodeTimeout := int .Values.cluster.nodeTimeout -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-cluster-scale
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "percona-valkey.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cluster-scale
+    spec:
+      serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      restartPolicy: OnFailure
+      containers:
+        - name: cluster-scale
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- if .Values.auth.enabled }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+              DESIRED={{ $replicas }}
+              PORT={{ $port }}
+              REPLICAS_PER_PRIMARY={{ $replicasPerPrimary }}
+              NODE_TIMEOUT_MS={{ $nodeTimeout }}
+
+              {{- if .Values.auth.enabled }}
+              AUTH="-a $VALKEY_PASSWORD"
+              {{- else }}
+              AUTH=""
+              {{- end }}
+
+              # -----------------------------------------------------------
+              # Find first reachable node
+              # -----------------------------------------------------------
+              REF_HOST=""
+              for i in $(seq 0 $((DESIRED - 1))); do
+                H="{{ $fullname }}-${i}.${HEADLESS}"
+                if valkey-cli -h "$H" -p $PORT $AUTH ping 2>/dev/null | grep -q PONG; then
+                  REF_HOST="$H"
+                  break
+                fi
+              done
+
+              if [ -z "$REF_HOST" ]; then
+                echo "ERROR: No reachable cluster node found."
+                exit 1
+              fi
+              echo "Reference node: $REF_HOST"
+
+              # -----------------------------------------------------------
+              # If cluster is not formed yet, do full creation and exit
+              # (handles case where initial cluster-init failed)
+              # -----------------------------------------------------------
+              CLUSTER_STATE=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+              if [ "$CLUSTER_STATE" != "cluster_state:ok" ]; then
+                echo "Cluster not in OK state ($CLUSTER_STATE). Running full cluster creation..."
+                NODES=""
+                for i in $(seq 0 $((DESIRED - 1))); do
+                  H="{{ $fullname }}-${i}.${HEADLESS}"
+                  echo "  Waiting for ${H}..."
+                  until valkey-cli -h "$H" -p $PORT $AUTH ping 2>/dev/null | grep -q PONG; do sleep 2; done
+                  NODES="$NODES ${H}:${PORT}"
+                done
+                valkey-cli --cluster create $AUTH \
+                  --cluster-replicas $REPLICAS_PER_PRIMARY \
+                  --cluster-yes \
+                  $NODES
+                echo "Cluster created successfully."
+                exit 0
+              fi
+
+              echo "Cluster is OK. Checking for scaling operations..."
+              CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+              KNOWN=$(echo "$CLUSTER_NODES" | grep -cv "^$")
+              echo "Current cluster nodes: $KNOWN, desired pods: $DESIRED"
+
+              # =========================================================
+              # SCALE UP — add pods that are not yet in the cluster
+              # =========================================================
+              ADDED=0
+              NEW_IDS=""
+              for i in $(seq 0 $((DESIRED - 1))); do
+                POD="{{ $fullname }}-${i}.${HEADLESS}"
+
+                # Wait for pod (up to 120 s)
+                WAIT=0
+                while ! valkey-cli -h "$POD" -p $PORT $AUTH ping 2>/dev/null | grep -q PONG; do
+                  WAIT=$((WAIT + 1))
+                  if [ $WAIT -gt 60 ]; then
+                    echo "WARN: $POD not reachable after 120 s — skipping."
+                    continue 2
+                  fi
+                  sleep 2
+                done
+
+                POD_ID=$(valkey-cli -h "$POD" -p $PORT $AUTH cluster myid 2>/dev/null | tr -d '\r')
+
+                if ! echo "$CLUSTER_NODES" | grep -q "$POD_ID"; then
+                  echo "Adding $POD ($POD_ID) to cluster..."
+                  valkey-cli $AUTH --cluster add-node "${POD}:${PORT}" "${REF_HOST}:${PORT}"
+                  ADDED=$((ADDED + 1))
+                  NEW_IDS="$NEW_IDS $POD_ID"
+                  sleep 2
+                  CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+                fi
+              done
+
+              if [ $ADDED -gt 0 ]; then
+                echo "Added $ADDED new node(s)."
+
+                # Decide how many of the new masters should become replicas
+                TARGET_MASTERS=$((DESIRED / (1 + REPLICAS_PER_PRIMARY)))
+                CURRENT_MASTERS=$(echo "$CLUSTER_NODES" | grep "master" | grep -vc "fail" || true)
+                echo "Target masters: $TARGET_MASTERS, current masters: $CURRENT_MASTERS"
+
+                if [ "$CURRENT_MASTERS" -gt "$TARGET_MASTERS" ]; then
+                  EXCESS=$((CURRENT_MASTERS - TARGET_MASTERS))
+                  echo "Converting $EXCESS new master(s) to replicas..."
+
+                  CONVERTED=0
+                  for NID in $NEW_IDS; do
+                    [ $CONVERTED -ge $EXCESS ] && break
+
+                    # Verify this node is still an empty master
+                    NLINE=$(echo "$CLUSTER_NODES" | grep "$NID")
+                    echo "$NLINE" | grep -q "master" || continue
+                    NFIELDS=$(echo "$NLINE" | awk '{print NF}')
+                    [ "$NFIELDS" -gt 8 ] && continue   # has slots already
+
+                    # Pick master with fewest replicas
+                    BEST_MID=""
+                    BEST_CNT=999
+                    for MID in $(echo "$CLUSTER_NODES" | awk '/master/ && !/fail/ && NF>8 {print $1}'); do
+                      CNT=$(echo "$CLUSTER_NODES" | awk -v m="$MID" '$4==m {c++} END {print c+0}')
+                      if [ "$CNT" -lt "$BEST_CNT" ]; then
+                        BEST_CNT=$CNT
+                        BEST_MID=$MID
+                      fi
+                    done
+
+                    if [ -n "$BEST_MID" ]; then
+                      N_IP=$(echo "$NLINE" | awk '{print $2}' | cut -d: -f1)
+                      echo "  $NID -> replica of $BEST_MID"
+                      valkey-cli -h "$N_IP" -p $PORT $AUTH cluster replicate "$BEST_MID"
+                      CONVERTED=$((CONVERTED + 1))
+                      sleep 1
+                      CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+                    fi
+                  done
+                fi
+
+                echo "Rebalancing slots across masters..."
+                valkey-cli $AUTH --cluster rebalance "${REF_HOST}:${PORT}" \
+                  --cluster-use-empty-masters || \
+                  echo "WARN: rebalance exited non-zero (may need manual check)"
+              fi
+
+              # =========================================================
+              # SCALE DOWN — clean up nodes that no longer have pods
+              # =========================================================
+              CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+              DEAD_IDS=$(echo "$CLUSTER_NODES" | grep -E "fail|noaddr" | awk '{print $1}')
+
+              if [ -n "$DEAD_IDS" ]; then
+                WAIT_SEC=$(( (NODE_TIMEOUT_MS / 1000) + 15 ))
+                echo "Found dead nodes. Waiting ${WAIT_SEC}s for automatic failover..."
+                sleep $WAIT_SEC
+
+                CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+
+                for DID in $DEAD_IDS; do
+                  DLINE=$(echo "$CLUSTER_NODES" | grep "$DID")
+                  # Check if dead node still owns slots (fields 9+)
+                  DSLOTS=$(echo "$DLINE" | awk '{for(i=9;i<=NF;i++) print $i}')
+
+                  if [ -n "$DSLOTS" ]; then
+                    echo "WARN: Dead node $DID still owns slots. Waiting 30 s more..."
+                    sleep 30
+                    CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+                    DLINE=$(echo "$CLUSTER_NODES" | grep "$DID")
+                    DSLOTS=$(echo "$DLINE" | awk '{for(i=9;i<=NF;i++) print $i}')
+
+                    if [ -n "$DSLOTS" ]; then
+                      echo "Dead node $DID still owns slots. Attempting --cluster fix..."
+                      valkey-cli $AUTH --cluster fix "${REF_HOST}:${PORT}" --cluster-fix-with-unreachable-masters || true
+                      sleep 5
+                      CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes 2>/dev/null)
+                    fi
+                  fi
+
+                  echo "Forgetting node $DID from all live nodes..."
+                  for i in $(seq 0 $((DESIRED - 1))); do
+                    LH="{{ $fullname }}-${i}.${HEADLESS}"
+                    valkey-cli -h "$LH" -p $PORT $AUTH cluster forget "$DID" 2>/dev/null || true
+                  done
+                  echo "  Removed $DID."
+                done
+
+                echo "Rebalancing after scale-down..."
+                valkey-cli $AUTH --cluster rebalance "${REF_HOST}:${PORT}" || \
+                  echo "WARN: rebalance exited non-zero"
+              fi
+
+              # =========================================================
+              # FINAL STATUS
+              # =========================================================
+              echo ""
+              echo "=== Cluster Status ==="
+              valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster info
+              echo ""
+              echo "=== Cluster Nodes ==="
+              valkey-cli -h "$REF_HOST" -p $PORT $AUTH cluster nodes
+{{- end }}

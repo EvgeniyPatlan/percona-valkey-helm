@@ -483,21 +483,19 @@ Pod annotations include `checksum/config` computed from the ConfigMap content. W
 
 ## Known Limitations
 
-1. **Cluster scaling requires manual intervention**: Adding or removing nodes from an existing Valkey Cluster is not automated. You must manually run `valkey-cli --cluster add-node` or `valkey-cli --cluster del-node` and then rebalance slots with `valkey-cli --cluster rebalance`.
+1. **Cluster-init Job runs only on initial install**: The `cluster-init-job.yaml` is a Helm `post-install` hook, not `post-upgrade`. Scaling the cluster up after the initial install requires manual node addition.
 
-2. **Cluster-init Job runs only on initial install**: The `cluster-init-job.yaml` is a Helm `post-install` hook, not `post-upgrade`. Scaling the cluster up after the initial install requires manual node addition.
+2. **Hardened image uses RPM image for Jobs**: The cluster-init Job and helm test pod always use the RPM image variant (`percona-valkey.rpmImage`), because they need shell utilities (`sh`, `grep`, `valkey-cli`) that are not available in the distroless hardened image.
 
-3. **Hardened image uses RPM image for Jobs**: The cluster-init Job and helm test pod always use the RPM image variant (`percona-valkey.rpmImage`), because they need shell utilities (`sh`, `grep`, `valkey-cli`) that are not available in the distroless hardened image.
+3. **Password rotation requires pod restart**: Changing `auth.password` or the referenced Secret updates the Secret object, but running pods must be restarted to pick up the new password (the entrypoint reads it at startup). Use `kubectl rollout restart statefulset/<release>-percona-valkey`.
 
-4. **Password rotation requires pod restart**: Changing `auth.password` or the referenced Secret updates the Secret object, but running pods must be restarted to pick up the new password (the entrypoint reads it at startup). Use `kubectl rollout restart statefulset/<release>-percona-valkey`.
+4. **No built-in Sentinel support**: This chart supports standalone and native Valkey Cluster modes only. Sentinel-based HA is not included.
 
-5. **No built-in Sentinel support**: This chart supports standalone and native Valkey Cluster modes only. Sentinel-based HA is not included.
+5. **No TLS support**: TLS termination is not configured in this chart version. Use a service mesh (Istio, Linkerd) or add TLS configuration via `config.customConfig` and volume-mounted certificates.
 
-6. **No TLS support**: TLS termination is not configured in this chart version. Use a service mesh (Istio, Linkerd) or add TLS configuration via `config.customConfig` and volume-mounted certificates.
+6. **Auto-generated passwords change on upgrade**: If `auth.password` is left empty, Helm generates a random password on each `helm template` / `helm upgrade`. To avoid this, either set an explicit password or use `auth.existingSecret` to manage the Secret outside of Helm.
 
-7. **Auto-generated passwords change on upgrade**: If `auth.password` is left empty, Helm generates a random password on each `helm template` / `helm upgrade`. To avoid this, either set an explicit password or use `auth.existingSecret` to manage the Secret outside of Helm.
-
-8. **Single-namespace deployment**: All resources are deployed into the release namespace. Cross-namespace cluster topologies are not supported.
+7. **Single-namespace deployment**: All resources are deployed into the release namespace. Cross-namespace cluster topologies are not supported.
 
 ## Troubleshooting
 
