@@ -16,6 +16,56 @@ To connect to Valkey:
 
 {{- end }}
 
+{{- if include "percona-valkey.externalAccessStandalone" . }}
+
+External access is enabled ({{ .Values.externalAccess.service.type }}).
+
+{{- if eq .Values.externalAccess.service.type "LoadBalancer" }}
+  export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  # If your cloud provider returns a hostname instead:
+  # export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+{{- else if eq .Values.externalAccess.service.type "NodePort" }}
+  export NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+  export NODE_PORT=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.spec.ports[?(@.name=="valkey")].nodePort}')
+{{- end }}
+  {{- if .Values.auth.enabled }}
+  export VALKEY_PASSWORD=$(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d)
+  {{- if eq .Values.externalAccess.service.type "LoadBalancer" }}
+  valkey-cli -h $SERVICE_IP -p {{ .Values.externalAccess.service.port }} -a $VALKEY_PASSWORD
+  {{- else }}
+  valkey-cli -h $NODE_IP -p $NODE_PORT -a $VALKEY_PASSWORD
+  {{- end }}
+  {{- else }}
+  {{- if eq .Values.externalAccess.service.type "LoadBalancer" }}
+  valkey-cli -h $SERVICE_IP -p {{ .Values.externalAccess.service.port }}
+  {{- else }}
+  valkey-cli -h $NODE_IP -p $NODE_PORT
+  {{- end }}
+  {{- end }}
+
+{{- else if include "percona-valkey.externalAccessCluster" . }}
+
+External access is enabled for cluster mode ({{ .Values.externalAccess.service.type }}).
+Each pod has a dedicated {{ .Values.externalAccess.service.type }} service for cluster-announce-ip discovery.
+
+{{- if eq .Values.externalAccess.service.type "LoadBalancer" }}
+To list external IPs:
+  for i in $(seq 0 {{ sub (int .Values.cluster.replicas) 1 }}); do
+    echo "{{ $fullname }}-$i: $(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }}-$i -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+  done
+{{- else if eq .Values.externalAccess.service.type "NodePort" }}
+To list external NodePorts:
+  for i in $(seq 0 {{ sub (int .Values.cluster.replicas) 1 }}); do
+    echo "{{ $fullname }}-$i: $(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }}-$i -o jsonpath='{.spec.ports[?(@.name=="valkey")].nodePort}')"
+  done
+{{- end }}
+
+  {{- if .Values.auth.enabled }}
+  export VALKEY_PASSWORD=$(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d)
+  {{- end }}
+
+{{- else }}
+
   export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.clusterIP}')
   {{- if .Values.auth.enabled }}
   export VALKEY_PASSWORD=$(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d)
@@ -31,6 +81,8 @@ To connect to Valkey:
   valkey-cli -h $SERVICE_IP -p {{ .Values.service.port }}
   {{- end }}
   {{- end }}
+
+{{- end }}
 
 To run the connection test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

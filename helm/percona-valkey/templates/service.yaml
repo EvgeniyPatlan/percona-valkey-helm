@@ -1,3 +1,4 @@
+{{- $isStandaloneExternal := include "percona-valkey.externalAccessStandalone" . -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -5,22 +6,48 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "percona-valkey.labels" . | nindent 4 }}
-  {{- with .Values.service.annotations }}
+  {{- $svcAnnotations := .Values.service.annotations }}
+  {{- if $isStandaloneExternal }}
+  {{- $svcAnnotations = merge (deepCopy (.Values.externalAccess.service.annotations | default dict)) ($svcAnnotations | default dict) }}
+  {{- end }}
+  {{- with $svcAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  {{- if $isStandaloneExternal }}
+  type: {{ .Values.externalAccess.service.type }}
+  {{- if .Values.externalAccess.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml .Values.externalAccess.service.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  externalTrafficPolicy: {{ .Values.externalAccess.service.externalTrafficPolicy }}
+  {{- if and (eq .Values.externalAccess.service.type "LoadBalancer") .Values.externalAccess.standalone.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.externalAccess.standalone.loadBalancerIP }}
+  {{- end }}
+  {{- else }}
   type: {{ .Values.service.type }}
+  {{- end }}
   ports:
     - name: valkey
       port: {{ .Values.service.port }}
       targetPort: valkey
       protocol: TCP
+      {{- if and $isStandaloneExternal (eq .Values.externalAccess.service.type "NodePort") }}
+      {{- if .Values.externalAccess.standalone.nodePort }}
+      nodePort: {{ .Values.externalAccess.standalone.nodePort }}
+      {{- end }}
+      {{- end }}
     {{- if .Values.tls.enabled }}
     - name: valkey-tls
       port: {{ .Values.tls.port }}
       targetPort: valkey-tls
       protocol: TCP
+      {{- if and $isStandaloneExternal (eq .Values.externalAccess.service.type "NodePort") }}
+      {{- if .Values.externalAccess.standalone.tlsNodePort }}
+      nodePort: {{ .Values.externalAccess.standalone.tlsNodePort }}
+      {{- end }}
+      {{- end }}
     {{- end }}
   selector:
     {{- include "percona-valkey.selectorLabels" . | nindent 4 }}

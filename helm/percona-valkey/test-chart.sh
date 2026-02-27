@@ -1675,6 +1675,131 @@ test_template_render() {
     else
         fail "template cluster + metrics + networkPolicy combined (np=$np_ok ss=$ss_ok cm=$cm_ok)"
     fi
+
+    # --- External Access Tests ---
+
+    # externalAccess disabled by default: service is ClusterIP, no per-pod services
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "type: ClusterIP" && ! echo "$out" | grep -q "LoadBalancer"; then
+        pass "template externalAccess disabled by default (ClusterIP)"
+    else
+        fail "template externalAccess disabled by default (ClusterIP)"
+    fi
+
+    # No per-pod services when disabled
+    if ! helm template test "$CHART_DIR" --show-only templates/service-per-pod.yaml 2>&1 | grep -q "kind: Service"; then
+        pass "template no per-pod services when externalAccess disabled"
+    else
+        fail "template no per-pod services when externalAccess disabled"
+    fi
+
+    # Standalone + externalAccess LoadBalancer
+    out=$(helm template test "$CHART_DIR" --set externalAccess.enabled=true --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "type: LoadBalancer" && echo "$out" | grep -q "externalTrafficPolicy: Cluster"; then
+        pass "template standalone externalAccess LoadBalancer"
+    else
+        fail "template standalone externalAccess LoadBalancer"
+    fi
+
+    # Standalone + externalAccess NodePort with explicit nodePort
+    out=$(helm template test "$CHART_DIR" --set externalAccess.enabled=true --set externalAccess.service.type=NodePort --set externalAccess.standalone.nodePort=30379 --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "type: NodePort" && echo "$out" | grep -q "nodePort: 30379"; then
+        pass "template standalone externalAccess NodePort"
+    else
+        fail "template standalone externalAccess NodePort"
+    fi
+
+    # Cluster + externalAccess: per-pod services count matches replicas
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --show-only templates/service-per-pod.yaml 2>&1)
+    local svc_count
+    svc_count=$(echo "$out" | grep -c "kind: Service" || true)
+    if [ "$svc_count" -eq 6 ]; then
+        pass "template cluster per-pod services count (6)"
+    else
+        fail "template cluster per-pod services count (expected 6, got $svc_count)"
+    fi
+
+    # Per-pod services include statefulset.kubernetes.io/pod-name selector
+    if echo "$out" | grep -q "statefulset.kubernetes.io/pod-name"; then
+        pass "template per-pod services have pod-name selector"
+    else
+        fail "template per-pod services have pod-name selector"
+    fi
+
+    # Cluster + externalAccess: RBAC Role for LoadBalancer
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --show-only templates/role.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Role" && ! echo "$out" | grep -q "kind: ClusterRole"; then
+        pass "template RBAC Role for LoadBalancer"
+    else
+        fail "template RBAC Role for LoadBalancer"
+    fi
+
+    # Cluster + externalAccess NodePort: ClusterRole
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --set externalAccess.service.type=NodePort --show-only templates/role.yaml 2>&1)
+    if echo "$out" | grep -q "kind: ClusterRole"; then
+        pass "template RBAC ClusterRole for NodePort"
+    else
+        fail "template RBAC ClusterRole for NodePort"
+    fi
+
+    # ClusterRole includes nodes resource
+    if echo "$out" | grep -q '"nodes"'; then
+        pass "template ClusterRole includes nodes resource"
+    else
+        fail "template ClusterRole includes nodes resource"
+    fi
+
+    # Cluster + externalAccess: init container present
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "discover-external-ip"; then
+        pass "template init container discover-external-ip present"
+    else
+        fail "template init container discover-external-ip present"
+    fi
+
+    # Cluster + externalAccess: cluster-announce flags in command
+    if echo "$out" | grep -q "cluster-announce-ip" && echo "$out" | grep -q "cluster-announce-port" && echo "$out" | grep -q "cluster-announce-bus-port"; then
+        pass "template cluster-announce flags in command"
+    else
+        fail "template cluster-announce flags in command"
+    fi
+
+    # Cluster + externalAccess: automountServiceAccountToken is true
+    if echo "$out" | grep -q "automountServiceAccountToken: true"; then
+        pass "template automountServiceAccountToken: true for externalAccess"
+    else
+        fail "template automountServiceAccountToken: true for externalAccess"
+    fi
+
+    # Cluster + externalAccess: external-config volume exists
+    if echo "$out" | grep -q "external-config"; then
+        pass "template external-config volume present"
+    else
+        fail "template external-config volume present"
+    fi
+
+    # TLS ports in per-pod services
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --set tls.enabled=true --set tls.existingSecret=mysecret --show-only templates/service-per-pod.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-tls" && echo "$out" | grep -q "6380"; then
+        pass "template TLS port in per-pod services"
+    else
+        fail "template TLS port in per-pod services"
+    fi
+
+    # NetworkPolicy includes TLS port
+    out=$(helm template test "$CHART_DIR" --set networkPolicy.enabled=true --set tls.enabled=true --set tls.existingSecret=mysecret --show-only templates/networkpolicy.yaml 2>&1)
+    if echo "$out" | grep -q "6380"; then
+        pass "template NetworkPolicy includes TLS port"
+    else
+        fail "template NetworkPolicy includes TLS port"
+    fi
+
+    # No RBAC when externalAccess disabled
+    if ! helm template test "$CHART_DIR" --set mode=cluster --show-only templates/role.yaml 2>&1 | grep -q "kind:"; then
+        pass "template no RBAC when externalAccess disabled"
+    else
+        fail "template no RBAC when externalAccess disabled"
+    fi
 }
 
 # --- Deployment Tests ---

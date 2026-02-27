@@ -176,6 +176,31 @@ disableCommands:
 # disableCommandsStandalone: []
 # disableCommandsCluster: []
 
+## @section External Access
+## Expose Valkey to clients outside the Kubernetes cluster.
+## Standalone: changes main service type to LoadBalancer/NodePort.
+## Cluster: creates per-pod services + init container for cluster-announce-ip discovery.
+externalAccess:
+  enabled: false
+  service:
+    type: LoadBalancer
+    port: 6379
+    annotations: {}
+    loadBalancerSourceRanges: []
+    externalTrafficPolicy: Cluster
+  ## Standalone-specific overrides
+  standalone:
+    nodePort: 0
+    tlsNodePort: 0
+    loadBalancerIP: ""
+  ## Cluster-specific overrides (lists indexed by pod ordinal)
+  cluster:
+    annotations: {}
+    nodePorts: []
+    tlsNodePorts: []
+    busNodePorts: []
+    loadBalancerIPs: []
+
 ## @section Network Policy
 networkPolicy:
   enabled: false

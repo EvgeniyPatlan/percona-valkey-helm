@@ -200,3 +200,29 @@ Pod management policy based on mode.
 {{- "OrderedReady" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Nil-safe check for externalAccess.enabled.
+Returns "true" (string) if enabled, empty string otherwise.
+*/}}
+{{- define "percona-valkey.externalAccessEnabled" -}}
+{{- if .Values.externalAccess }}
+{{- if .Values.externalAccess.enabled }}true{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Nil-safe check for externalAccess.enabled AND cluster mode.
+Returns "true" (string) if both conditions met, empty string otherwise.
+*/}}
+{{- define "percona-valkey.externalAccessCluster" -}}
+{{- if and (include "percona-valkey.externalAccessEnabled" .) (eq .Values.mode "cluster") }}true{{- end }}
+{{- end }}
+
+{{/*
+Nil-safe check for externalAccess.enabled AND standalone mode.
+Returns "true" (string) if both conditions met, empty string otherwise.
+*/}}
+{{- define "percona-valkey.externalAccessStandalone" -}}
+{{- if and (include "percona-valkey.externalAccessEnabled" .) (ne .Values.mode "cluster") }}true{{- end }}
+{{- end }}

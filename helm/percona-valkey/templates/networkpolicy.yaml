@@ -19,6 +19,10 @@ spec:
     - ports:
         - port: {{ .Values.service.port }}
           protocol: TCP
+        {{- if .Values.tls.enabled }}
+        - port: {{ .Values.tls.port }}
+          protocol: TCP
+        {{- end }}
         {{- if eq .Values.mode "cluster" }}
         - port: {{ .Values.cluster.busPort }}
           protocol: TCP

@@ -1,0 +1,35 @@
+{{- if include "percona-valkey.externalAccessCluster" . }}
+{{- if eq .Values.externalAccess.service.type "NodePort" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+{{- end }}
+{{- end }}

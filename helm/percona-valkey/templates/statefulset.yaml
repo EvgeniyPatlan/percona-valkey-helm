@@ -37,6 +37,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- if include "percona-valkey.externalAccessCluster" . }}
+      automountServiceAccountToken: true
+      {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -55,7 +58,7 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled }}
+      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled (include "percona-valkey.externalAccessCluster" .) }}
       initContainers:
         {{- if .Values.sysctlInit.enabled }}
         - name: sysctl-init
@@ -99,6 +102,70 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- if include "percona-valkey.externalAccessCluster" . }}
+        - name: discover-external-ip
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+              API="https://kubernetes.default.svc"
+              AUTH="Authorization: Bearer $TOKEN"
+              HOSTNAME=$(hostname)
+              SVC_NAME="{{ include "percona-valkey.fullname" . }}-${HOSTNAME##*-}"
+              {{- if eq .Values.externalAccess.service.type "NodePort" }}
+              # --- NodePort mode: get node external IP + allocated nodePort ---
+              # Get the node this pod is running on
+              POD_JSON=$(curl -sSk -H "$AUTH" "$API/api/v1/namespaces/$NS/pods/$HOSTNAME")
+              NODE_NAME=$(echo "$POD_JSON" | grep '"nodeName"' | head -1 | sed 's/.*"nodeName" *: *"\([^"]*\)".*/\1/')
+              # Get node external IP (prefer ExternalIP, fall back to InternalIP)
+              NODE_JSON=$(curl -sSk -H "$AUTH" "$API/api/v1/nodes/$NODE_NAME")
+              EXTERNAL_IP=$(echo "$NODE_JSON" | grep -A1 '"type" *: *"ExternalIP"' | grep '"address"' | head -1 | sed 's/.*"address" *: *"\([^"]*\)".*/\1/')
+              if [ -z "$EXTERNAL_IP" ]; then
+                EXTERNAL_IP=$(echo "$NODE_JSON" | grep -A1 '"type" *: *"InternalIP"' | grep '"address"' | head -1 | sed 's/.*"address" *: *"\([^"]*\)".*/\1/')
+              fi
+              # Get nodePort from per-pod service
+              SVC_JSON=$(curl -sSk -H "$AUTH" "$API/api/v1/namespaces/$NS/services/$SVC_NAME")
+              EXTERNAL_PORT=$(echo "$SVC_JSON" | grep -A3 '"name" *: *"valkey"' | grep '"nodePort"' | head -1 | sed 's/[^0-9]//g')
+              BUS_PORT=$(echo "$SVC_JSON" | grep -A3 '"name" *: *"cluster-bus"' | grep '"nodePort"' | head -1 | sed 's/[^0-9]//g')
+              {{- else }}
+              # --- LoadBalancer mode: poll until ingress IP is assigned ---
+              DEADLINE=$(($(date +%s) + 300))
+              EXTERNAL_IP=""
+              while [ -z "$EXTERNAL_IP" ]; do
+                SVC_JSON=$(curl -sSk -H "$AUTH" "$API/api/v1/namespaces/$NS/services/$SVC_NAME")
+                EXTERNAL_IP=$(echo "$SVC_JSON" | grep -A2 '"ingress"' | grep '"ip"' | head -1 | sed 's/.*"ip" *: *"\([^"]*\)".*/\1/')
+                if [ -z "$EXTERNAL_IP" ]; then
+                  # Try hostname field (e.g. AWS ELB)
+                  EXTERNAL_IP=$(echo "$SVC_JSON" | grep -A2 '"ingress"' | grep '"hostname"' | head -1 | sed 's/.*"hostname" *: *"\([^"]*\)".*/\1/')
+                fi
+                if [ -z "$EXTERNAL_IP" ]; then
+                  NOW=$(date +%s)
+                  if [ "$NOW" -gt "$DEADLINE" ]; then
+                    echo "ERROR: Timeout waiting for LoadBalancer IP on $SVC_NAME"
+                    exit 1
+                  fi
+                  echo "Waiting for LoadBalancer IP on $SVC_NAME..."
+                  sleep 5
+                fi
+              done
+              EXTERNAL_PORT={{ .Values.externalAccess.service.port }}
+              BUS_PORT={{ .Values.cluster.busPort }}
+              {{- end }}
+              echo "Discovered: IP=$EXTERNAL_IP PORT=$EXTERNAL_PORT BUS=$BUS_PORT"
+              echo -n "$EXTERNAL_IP" > /external-config/external-ip
+              echo -n "$EXTERNAL_PORT" > /external-config/external-port
+              echo -n "$BUS_PORT" > /external-config/external-bus-port
+          volumeMounts:
+            - name: external-config
+              mountPath: /external-config
+        {{- end }}
       {{- end }}
       containers:
         - name: valkey
@@ -131,6 +198,22 @@ spec:
           {{- if .Values.diagnosticMode.enabled }}
           command: {{- toYaml .Values.diagnosticMode.command | nindent 12 }}
           args: {{- toYaml .Values.diagnosticMode.args | nindent 12 }}
+          {{- else if include "percona-valkey.externalAccessCluster" . }}
+          command:
+            - sh
+            - -c
+            - |
+              ANNOUNCE_IP=$(cat /external-config/external-ip)
+              ANNOUNCE_PORT=$(cat /external-config/external-port)
+              ANNOUNCE_BUS_PORT=$(cat /external-config/external-bus-port)
+              EXTRA_ARGS="--cluster-announce-ip $ANNOUNCE_IP --cluster-announce-port $ANNOUNCE_PORT --cluster-announce-bus-port $ANNOUNCE_BUS_PORT"
+              {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
+              EXTRA_ARGS="$EXTRA_ARGS --requirepass $VALKEY_PASSWORD --masterauth $VALKEY_PASSWORD"
+              {{- end }}
+              {{- if .Values.config.extraFlags }}
+              EXTRA_ARGS="$EXTRA_ARGS {{ .Values.config.extraFlags }}"
+              {{- end }}
+              exec valkey-server /etc/valkey/valkey.conf $EXTRA_ARGS
           {{- else }}
           args:
             - /etc/valkey/valkey.conf
@@ -156,7 +239,7 @@ spec:
             - name: VALKEY_BIND
               value: {{ .Values.config.bind | quote }}
             {{- end }}
-            {{- if eq .Values.mode "cluster" }}
+            {{- if and (eq .Values.mode "cluster") (not (include "percona-valkey.externalAccessEnabled" .)) }}
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -306,6 +389,11 @@ spec:
               mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
             {{- end }}
+            {{- if include "percona-valkey.externalAccessCluster" . }}
+            - name: external-config
+              mountPath: /external-config
+              readOnly: true
+            {{- end }}
             {{- if eq .Values.image.variant "hardened" }}
             - name: tmp
               mountPath: /tmp
@@ -382,6 +470,10 @@ spec:
                 path: tls.key
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if include "percona-valkey.externalAccessCluster" . }}
+        - name: external-config
+          emptyDir: {}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

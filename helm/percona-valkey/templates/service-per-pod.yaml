@@ -1,0 +1,73 @@
+{{- if include "percona-valkey.externalAccessCluster" . }}
+{{- $fullname := include "percona-valkey.fullname" . }}
+{{- $replicas := int .Values.cluster.replicas }}
+{{- $svcType := .Values.externalAccess.service.type }}
+{{- $svcPort := int .Values.externalAccess.service.port }}
+{{- $busPort := int .Values.cluster.busPort }}
+{{- $nodePorts := .Values.externalAccess.cluster.nodePorts }}
+{{- $tlsNodePorts := .Values.externalAccess.cluster.tlsNodePorts }}
+{{- $busNodePorts := .Values.externalAccess.cluster.busNodePorts }}
+{{- $lbIPs := .Values.externalAccess.cluster.loadBalancerIPs }}
+{{- $labels := include "percona-valkey.labels" . }}
+{{- $selectorLabels := include "percona-valkey.selectorLabels" . }}
+{{- range $i := until $replicas }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+  {{- $annotations := merge (deepCopy ($.Values.externalAccess.cluster.annotations | default dict)) ($.Values.externalAccess.service.annotations | default dict) }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svcType }}
+  {{- if $.Values.externalAccess.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $.Values.externalAccess.service.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  externalTrafficPolicy: {{ $.Values.externalAccess.service.externalTrafficPolicy }}
+  {{- if and (eq $svcType "LoadBalancer") $lbIPs }}
+  {{- if gt (len $lbIPs) $i }}
+  loadBalancerIP: {{ index $lbIPs $i }}
+  {{- end }}
+  {{- end }}
+  ports:
+    - name: valkey
+      port: {{ $svcPort }}
+      targetPort: valkey
+      protocol: TCP
+      {{- if and (eq $svcType "NodePort") $nodePorts }}
+      {{- if gt (len $nodePorts) $i }}
+      nodePort: {{ index $nodePorts $i }}
+      {{- end }}
+      {{- end }}
+    {{- if $.Values.tls.enabled }}
+    - name: valkey-tls
+      port: {{ int $.Values.tls.port }}
+      targetPort: valkey-tls
+      protocol: TCP
+      {{- if and (eq $svcType "NodePort") $tlsNodePorts }}
+      {{- if gt (len $tlsNodePorts) $i }}
+      nodePort: {{ index $tlsNodePorts $i }}
+      {{- end }}
+      {{- end }}
+    {{- end }}
+    - name: cluster-bus
+      port: {{ $busPort }}
+      targetPort: cluster-bus
+      protocol: TCP
+      {{- if and (eq $svcType "NodePort") $busNodePorts }}
+      {{- if gt (len $busNodePorts) $i }}
+      nodePort: {{ index $busNodePorts $i }}
+      {{- end }}
+      {{- end }}
+  selector:
+    {{- $selectorLabels | nindent 4 }}
+    statefulset.kubernetes.io/pod-name: {{ $fullname }}-{{ $i }}
+{{- end }}
+{{- end }}
