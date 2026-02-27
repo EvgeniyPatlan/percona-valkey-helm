@@ -134,6 +134,12 @@ test_lint() {
     else
         fail "lint cluster precheck"
     fi
+
+    if helm lint "$CHART_DIR" --set backup.enabled=true > /dev/null 2>&1; then
+        pass "lint backup enabled"
+    else
+        fail "lint backup enabled"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2232,6 +2238,95 @@ test_template_render() {
     else
         fail "template job custom repository + tag"
     fi
+
+    # --- Feature #26: Backup CronJob ---
+
+    # CronJob not rendered by default (backup.enabled=false)
+    out=$(helm template test "$CHART_DIR" 2>&1)
+    if ! echo "$out" | grep -q "kind: CronJob"; then
+        pass "template backup CronJob absent by default"
+    else
+        fail "template backup CronJob absent by default"
+    fi
+
+    # CronJob rendered when backup.enabled=true
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "kind: CronJob"; then
+        pass "template backup CronJob present when enabled"
+    else
+        fail "template backup CronJob present when enabled"
+    fi
+
+    # Backup PVC rendered when enabled (no existingClaim)
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --show-only templates/backup-pvc.yaml 2>&1)
+    if echo "$out" | grep -q "kind: PersistentVolumeClaim"; then
+        pass "template backup PVC rendered"
+    else
+        fail "template backup PVC rendered"
+    fi
+
+    # Backup PVC NOT rendered when existingClaim is set
+    if ! helm template test "$CHART_DIR" --set backup.enabled=true --set backup.storage.existingClaim=my-pvc --show-only templates/backup-pvc.yaml 2>&1 | grep -q "kind: PersistentVolumeClaim"; then
+        pass "template backup PVC skipped with existingClaim"
+    else
+        fail "template backup PVC skipped with existingClaim"
+    fi
+
+    # CronJob uses existingClaim name in volume
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set backup.storage.existingClaim=my-pvc --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "claimName: my-pvc"; then
+        pass "template backup CronJob uses existingClaim"
+    else
+        fail "template backup CronJob uses existingClaim"
+    fi
+
+    # CronJob uses correct schedule
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set 'backup.schedule=*/5 * * * *' --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q '"\*/5 \* \* \* \*"'; then
+        pass "template backup CronJob custom schedule"
+    else
+        fail "template backup CronJob custom schedule"
+    fi
+
+    # CronJob uses custom retention count
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set backup.retention=3 --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "KEEP=3"; then
+        pass "template backup CronJob custom retention"
+    else
+        fail "template backup CronJob custom retention"
+    fi
+
+    # CronJob has auth env var when auth enabled
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "VALKEY_PASSWORD"; then
+        pass "template backup CronJob has auth env"
+    else
+        fail "template backup CronJob has auth env"
+    fi
+
+    # CronJob has no auth env when auth disabled
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set auth.enabled=false --show-only templates/backup-cronjob.yaml 2>&1)
+    if ! echo "$out" | grep -q "VALKEY_PASSWORD"; then
+        pass "template backup CronJob no auth env when disabled"
+    else
+        fail "template backup CronJob no auth env when disabled"
+    fi
+
+    # CronJob has TLS volume mounts when TLS enabled
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set tls.enabled=true --set tls.existingSecret=tls-secret --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "tls-certs" && echo "$out" | grep -q "PORT=6380" && echo "$out" | grep -q "\-\-tls"; then
+        pass "template backup CronJob TLS support"
+    else
+        fail "template backup CronJob TLS support"
+    fi
+
+    # CronJob uses rpmImage (respects image.jobs.* overrides)
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set image.jobs.repository=myregistry.io/valkey --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "myregistry.io/valkey:9.0.3"; then
+        pass "template backup CronJob uses custom job image"
+    else
+        fail "template backup CronJob uses custom job image"
+    fi
 }
 
 # --- Deployment Tests ---
@@ -4303,6 +4398,83 @@ test_password_rotation() {
     cleanup "$rel"
 }
 
+test_backup_cronjob() {
+    bold "=== TEST: Backup CronJob ==="
+    local rel="t-backup"
+    cleanup "$rel"
+
+    # Deploy standalone with backup enabled
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set backup.enabled=true \
+        --set 'backup.schedule=*/2 * * * *' \
+        --set backup.retention=3 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "backup install"; cleanup "$rel"; return; }
+    pass "backup install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1 120s; then
+        pass "backup pod ready"
+    else
+        fail "backup pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify CronJob exists
+    if kubectl get cronjob ${rel}-percona-valkey-backup -n $NAMESPACE > /dev/null 2>&1; then
+        pass "backup CronJob exists"
+    else
+        fail "backup CronJob exists"; cleanup "$rel"; return
+    fi
+
+    # Verify backup PVC exists
+    if kubectl get pvc ${rel}-percona-valkey-backup -n $NAMESPACE > /dev/null 2>&1; then
+        pass "backup PVC exists"
+    else
+        fail "backup PVC exists"; cleanup "$rel"; return
+    fi
+
+    # Manually trigger a Job from the CronJob
+    kubectl create job ${rel}-backup-manual --from=cronjob/${rel}-percona-valkey-backup -n $NAMESPACE 2>&1 || { fail "backup manual trigger"; cleanup "$rel"; return; }
+    pass "backup manual trigger"
+
+    # Wait for Job completion
+    local deadline=$(( $(date +%s) + 120 ))
+    local job_done=false
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local status=$(kubectl get job ${rel}-backup-manual -n $NAMESPACE -o jsonpath='{.status.succeeded}' 2>/dev/null)
+        if [ "$status" = "1" ]; then
+            job_done=true
+            break
+        fi
+        # Check for failure
+        local failed=$(kubectl get job ${rel}-backup-manual -n $NAMESPACE -o jsonpath='{.status.failed}' 2>/dev/null)
+        if [ "${failed:-0}" -ge 3 ]; then
+            echo "    Backup job failed. Logs:"
+            kubectl logs job/${rel}-backup-manual -n $NAMESPACE 2>/dev/null || true
+            break
+        fi
+        sleep 5
+    done
+
+    if [ "$job_done" = "true" ]; then
+        pass "backup job completed"
+    else
+        fail "backup job completed"
+        kubectl logs job/${rel}-backup-manual -n $NAMESPACE 2>/dev/null || true
+        cleanup "$rel"; return
+    fi
+
+    # Verify backup file exists on PVC by checking job logs
+    local logs=$(kubectl logs job/${rel}-backup-manual -n $NAMESPACE 2>/dev/null)
+    if echo "$logs" | grep -q "Backup successful"; then
+        pass "backup file created"
+    else
+        fail "backup file created"
+    fi
+
+    cleanup "$rel"
+    kubectl delete job ${rel}-backup-manual -n $NAMESPACE 2>/dev/null || true
+}
+
 # --- Main ---
 
 main() {
@@ -4428,6 +4600,8 @@ main() {
     test_cluster_precheck
     echo ""
     test_password_rotation
+    echo ""
+    test_backup_cronjob
     echo ""
 
     # Summary

@@ -404,6 +404,31 @@ dnsConfig: {}
   #   - name: ndots
   #     value: "5"
 
+## @section Backup
+## Scheduled backup via CronJob. Streams RDB dump from Valkey to a backup PVC.
+backup:
+  enabled: false
+  ## Cron schedule (default: 2 AM daily)
+  schedule: "0 2 * * *"
+  ## Number of RDB backups to retain
+  retention: 7
+  ## Concurrency policy: Forbid (skip if previous still running), Replace, or Allow
+  concurrencyPolicy: Forbid
+  ## Pod ordinal that backup connects to (0 = first pod)
+  sourceOrdinal: 0
+  ## Backup PVC configuration
+  storage:
+    storageClass: ""
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+  ## Resources for backup container
+  resources: {}
+  ## Successful/failed job history limits
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
 ## @section Node placement
 nodeSelector: {}
 tolerations: []

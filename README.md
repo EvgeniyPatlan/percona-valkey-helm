@@ -586,19 +586,13 @@ Pod annotations include `checksum/config` computed from the ConfigMap content. W
 
 ## Known Limitations
 
-1. **Aggressive scale-down can cause data loss**: When scaling down, Valkey relies on automatic failover to promote replicas of terminated primaries. If both a primary and all its replicas are removed simultaneously, the hash slots owned by that shard are lost. Always ensure enough replicas survive — scale in steps of `(1 + replicasPerPrimary)` and verify `cluster nodes` between steps.
+1. **Scale-down requires care**: The `cluster.precheckBeforeScaleDown` pre-upgrade hook now blocks unsafe scale-downs by default. If the pre-check is disabled, aggressive scale-down can still cause data loss when both a primary and all its replicas are removed simultaneously. Always scale in steps of `(1 + replicasPerPrimary)` and verify `cluster nodes` between steps.
 
-2. **Hardened image uses RPM image for Jobs**: The cluster-init Job, cluster-scale Job, and helm test pod always use the RPM image variant (`percona-valkey.rpmImage`), because they need shell utilities (`sh`, `grep`, `valkey-cli`) that are not available in the distroless hardened image.
+2. **Jobs default to RPM image**: The cluster-init Job, cluster-scale Job, backup CronJob, and helm test pod use the RPM image variant by default because they need shell utilities (`sh`, `grep`, `valkey-cli`). Use `image.jobs.repository` and `image.jobs.tag` to override with a custom image in air-gapped environments.
 
-3. **Password rotation requires pod restart**: Changing `auth.password` or the referenced Secret updates the Secret object, but running pods must be restarted to pick up the new password (the entrypoint reads it at startup). Use `kubectl rollout restart statefulset/<release>-percona-valkey`.
+3. **No built-in Sentinel support**: This chart supports standalone and native Valkey Cluster modes only. Sentinel-based HA is not included.
 
-4. **No built-in Sentinel support**: This chart supports standalone and native Valkey Cluster modes only. Sentinel-based HA is not included.
-
-5. **No TLS support**: TLS termination is not configured in this chart version. Use a service mesh (Istio, Linkerd) or add TLS configuration via `config.customConfig` and volume-mounted certificates.
-
-6. **Auto-generated passwords and `helm template`**: Auto-generated passwords are preserved across `helm upgrade` (the chart looks up the existing Secret). However, `helm template` always generates a new random password since it cannot access the cluster. Use `auth.password` or `auth.existingSecret` if you need deterministic output.
-
-7. **Single-namespace deployment**: All resources are deployed into the release namespace. Cross-namespace cluster topologies are not supported.
+4. **Auto-generated passwords and `helm template`**: Auto-generated passwords are preserved across `helm upgrade` (the chart looks up the existing Secret). However, `helm template` always generates a new random password since it cannot access the cluster. Use `auth.password` or `auth.existingSecret` if you need deterministic output.
 
 ## Troubleshooting
 

@@ -1,0 +1,19 @@
+{{- if and .Values.backup.enabled (not .Values.backup.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    {{- toYaml .Values.backup.storage.accessModes | nindent 4 }}
+  {{- if .Values.backup.storage.storageClass }}
+  storageClassName: {{ .Values.backup.storage.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size }}
+{{- end }}

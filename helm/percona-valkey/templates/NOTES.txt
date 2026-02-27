@@ -110,6 +110,30 @@ To connect as a custom ACL user:
   valkey-cli -h <host> -p {{ .Values.service.port }} --user <username> --pass <password>
 {{- end }}
 
+{{- if .Values.backup.enabled }}
+
+Backup CronJob is enabled.
+  Schedule: {{ .Values.backup.schedule }}
+  Retention: {{ .Values.backup.retention }} backups
+  PVC: {{ .Values.backup.storage.existingClaim | default (printf "%s-backup" $fullname) }}
+
+To list existing backups:
+  kubectl exec -n {{ .Release.Namespace }} $(kubectl get pods -n {{ .Release.Namespace }} -l job-name -l app.kubernetes.io/component=backup --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "<backup-pod>") -- ls -lh /backup/
+
+To manually trigger a backup:
+  kubectl create job --from=cronjob/{{ $fullname }}-backup {{ $fullname }}-backup-manual -n {{ .Release.Namespace }}
+
+To restore from backup:
+  1. Scale down the StatefulSet:
+     kubectl scale statefulset {{ $fullname }} -n {{ .Release.Namespace }} --replicas=0
+  2. Copy the RDB file to the data PVC (example for pod-0):
+     kubectl run restore-helper --image={{ include "percona-valkey.rpmImage" . }} --restart=Never \
+       --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-{{ $fullname }}-0"}},{"name":"backup","persistentVolumeClaim":{"claimName":"{{ .Values.backup.storage.existingClaim | default (printf "%s-backup" $fullname) }}"}}],"containers":[{"name":"restore","image":"{{ include "percona-valkey.rpmImage" . }}","command":["sh","-c","cp /backup/<backup-file>.rdb /data/dump.rdb && chown 999:999 /data/dump.rdb"],"volumeMounts":[{"name":"data","mountPath":"/data"},{"name":"backup","mountPath":"/backup"}]}]}}' \
+       -n {{ .Release.Namespace }}
+  3. Scale the StatefulSet back up:
+     kubectl scale statefulset {{ $fullname }} -n {{ .Release.Namespace }} --replicas=1
+{{- end }}
+
 {{- if .Values.tls.enabled }}
 
 TLS is enabled on port {{ .Values.tls.port }}.

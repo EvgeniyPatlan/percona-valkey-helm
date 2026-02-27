@@ -1,0 +1,120 @@
+{{- if .Values.backup.enabled }}
+{{- $fullname := include "percona-valkey.fullname" . -}}
+{{- $port := int .Values.service.port -}}
+{{- $tlsPort := int .Values.tls.port -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: {{ .Values.backup.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "percona-valkey.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: {{ include "percona-valkey.rpmImage" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              env:
+                {{- if .Values.auth.enabled }}
+                - name: VALKEY_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "percona-valkey.secretName" . }}
+                      key: valkey-password
+                {{- end }}
+              {{- if .Values.backup.resources }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: backup-data
+                  mountPath: /backup
+                {{- if .Values.tls.enabled }}
+                - name: tls-certs
+                  mountPath: {{ .Values.tls.certMountPath }}
+                  readOnly: true
+                {{- end }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+
+                  HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+                  HOST="{{ $fullname }}-{{ .Values.backup.sourceOrdinal }}.${HEADLESS}"
+                  {{- if .Values.tls.enabled }}
+                  PORT={{ $tlsPort }}
+                  {{- else }}
+                  PORT={{ $port }}
+                  {{- end }}
+
+                  {{- if .Values.auth.enabled }}
+                  AUTH_FLAG="-a $VALKEY_PASSWORD"
+                  {{- else }}
+                  AUTH_FLAG=""
+                  {{- end }}
+
+                  {{- if .Values.tls.enabled }}
+                  TLS_FLAG="{{ include "percona-valkey.tlsCliFlags" . }}"
+                  {{- else }}
+                  TLS_FLAG=""
+                  {{- end }}
+
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_FILE="/backup/dump-${TIMESTAMP}.rdb"
+
+                  echo "Starting backup from ${HOST}:${PORT}..."
+                  valkey-cli -h "$HOST" -p "$PORT" $AUTH_FLAG $TLS_FLAG --rdb "$BACKUP_FILE"
+
+                  if [ -s "$BACKUP_FILE" ]; then
+                    echo "Backup successful: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
+                  else
+                    echo "ERROR: Backup file is empty or missing"
+                    exit 1
+                  fi
+
+                  # Retention: keep last N backups
+                  KEEP={{ .Values.backup.retention }}
+                  ls -t /backup/dump-*.rdb | tail -n +$((KEEP + 1)) | xargs rm -f 2>/dev/null || true
+                  echo "Retained last $KEEP backups."
+                  ls -lh /backup/dump-*.rdb
+          volumes:
+            - name: backup-data
+              persistentVolumeClaim:
+                claimName: {{ .Values.backup.storage.existingClaim | default (printf "%s-backup" $fullname) }}
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              secret:
+                secretName: {{ include "percona-valkey.tlsSecretName" . }}
+                items:
+                  - key: tls.crt
+                    path: tls.crt
+                  - key: tls.key
+                    path: tls.key
+                  - key: ca.crt
+                    path: ca.crt
+            {{- end }}
+{{- end }}
