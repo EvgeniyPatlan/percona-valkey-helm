@@ -1,0 +1,206 @@
+{{- if and (eq .Values.mode "cluster") .Values.cluster.precheckBeforeScaleDown }}
+{{- $fullname := include "percona-valkey.fullname" . -}}
+{{- $replicas := int .Values.cluster.replicas -}}
+{{- $replicasPerPrimary := int .Values.cluster.replicasPerPrimary -}}
+{{- $port := int .Values.service.port -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-cluster-precheck
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "percona-valkey.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cluster-precheck
+    spec:
+      serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      restartPolicy: Never
+      containers:
+        - name: cluster-precheck
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- if .Values.auth.enabled }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+              DESIRED={{ $replicas }}
+              PORT={{ $port }}
+              REPLICAS_PER_PRIMARY={{ $replicasPerPrimary }}
+
+              {{- if .Values.auth.enabled }}
+              AUTH="-a $VALKEY_PASSWORD"
+              {{- else }}
+              AUTH=""
+              {{- end }}
+
+              {{- if .Values.tls.enabled }}
+              TLS="--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+              {{- else }}
+              TLS=""
+              {{- end }}
+
+              # -----------------------------------------------------------
+              # Find first reachable node
+              # -----------------------------------------------------------
+              REF_HOST=""
+              for i in $(seq 0 $((DESIRED - 1))); do
+                H="{{ $fullname }}-${i}.${HEADLESS}"
+                if valkey-cli -h "$H" -p $PORT $AUTH $TLS ping 2>/dev/null | grep -q PONG; then
+                  REF_HOST="$H"
+                  break
+                fi
+              done
+
+              # If no pod is reachable, this is likely a fresh install — pass through
+              if [ -z "$REF_HOST" ]; then
+                echo "No reachable cluster node found. Likely a fresh install — skipping precheck."
+                exit 0
+              fi
+              echo "Reference node: $REF_HOST"
+
+              # -----------------------------------------------------------
+              # Get cluster state
+              # -----------------------------------------------------------
+              CLUSTER_STATE=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+
+              # If cluster is not formed, nothing to protect — pass through
+              if [ "$CLUSTER_STATE" != "cluster_state:ok" ]; then
+                echo "Cluster not in OK state ($CLUSTER_STATE). Skipping precheck."
+                exit 0
+              fi
+
+              CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster nodes 2>/dev/null)
+              CURRENT=$(echo "$CLUSTER_NODES" | grep -cv "^$")
+              echo "Cluster is OK. Current nodes: $CURRENT, desired: $DESIRED"
+
+              # -----------------------------------------------------------
+              # Skip if not scaling down
+              # -----------------------------------------------------------
+              if [ "$DESIRED" -ge "$CURRENT" ]; then
+                echo "Not a scale-down operation (desired >= current). Precheck passed."
+                exit 0
+              fi
+
+              # -----------------------------------------------------------
+              # Check 1: Cluster must be healthy
+              # -----------------------------------------------------------
+              echo "Cluster is healthy (cluster_state:ok)."
+
+              # -----------------------------------------------------------
+              # Check 2: Minimum masters after scale-down
+              # -----------------------------------------------------------
+              MASTERS_AFTER=$((DESIRED / (1 + REPLICAS_PER_PRIMARY)))
+              if [ "$MASTERS_AFTER" -lt 3 ]; then
+                echo "ERROR: Scale-down would result in $MASTERS_AFTER masters. Minimum is 3."
+                echo "Desired replicas: $DESIRED, replicasPerPrimary: $REPLICAS_PER_PRIMARY"
+                echo "Scale-down BLOCKED."
+                exit 1
+              fi
+              echo "Check passed: $MASTERS_AFTER masters after scale-down (>= 3 required)."
+
+              # -----------------------------------------------------------
+              # Check 3: No data loss — check pods being removed
+              # Pods with ordinals DESIRED..CURRENT-1 will be terminated
+              # -----------------------------------------------------------
+              UNSAFE=0
+              for i in $(seq $DESIRED $((CURRENT - 1))); do
+                POD_HOST="{{ $fullname }}-${i}.${HEADLESS}"
+                echo "Checking node at $POD_HOST..."
+
+                # Try to get the node ID
+                POD_ID=$(valkey-cli -h "$POD_HOST" -p $PORT $AUTH $TLS cluster myid 2>/dev/null | tr -d '\r')
+                if [ -z "$POD_ID" ]; then
+                  echo "  WARNING: Cannot reach $POD_HOST — node may already be down."
+                  continue
+                fi
+
+                # Check if this node is a master with slots
+                NODE_LINE=$(echo "$CLUSTER_NODES" | grep "$POD_ID" || true)
+                if [ -z "$NODE_LINE" ]; then
+                  echo "  Node $POD_ID not found in cluster nodes — skipping."
+                  continue
+                fi
+
+                IS_MASTER=$(echo "$NODE_LINE" | grep -c "master" || true)
+                if [ "$IS_MASTER" -eq 0 ]; then
+                  echo "  Node $POD_ID is a replica — safe to remove."
+                  continue
+                fi
+
+                # Check if master has slots (fields 9+)
+                HAS_SLOTS=$(echo "$NODE_LINE" | awk '{for(i=9;i<=NF;i++) print $i}')
+                if [ -z "$HAS_SLOTS" ]; then
+                  echo "  Node $POD_ID is an empty master (no slots) — safe to remove."
+                  continue
+                fi
+
+                # Master with slots — check if it has a healthy replica
+                REPLICA_COUNT=$(echo "$CLUSTER_NODES" | awk -v mid="$POD_ID" '$4==mid && !/fail/ {c++} END {print c+0}')
+                if [ "$REPLICA_COUNT" -eq 0 ]; then
+                  echo "  ERROR: Node $POD_ID is a master with slots but has NO healthy replica!"
+                  echo "  Slots: $HAS_SLOTS"
+                  echo "  Removing this node would cause data loss."
+                  UNSAFE=1
+                else
+                  echo "  Node $POD_ID is a master with slots but has $REPLICA_COUNT replica(s) — failover possible."
+                fi
+              done
+
+              if [ "$UNSAFE" -eq 1 ]; then
+                echo ""
+                echo "Scale-down BLOCKED: One or more masters being removed have slots with no replica."
+                echo "Please manually migrate slots or add replicas before scaling down."
+                exit 1
+              fi
+
+              echo ""
+              echo "All pre-checks passed. Scale-down is safe to proceed."
+              exit 0
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: {{ include "percona-valkey.tlsSecretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
+{{- end }}

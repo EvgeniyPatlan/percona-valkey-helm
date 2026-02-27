@@ -15,6 +15,11 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
+  ## Job image overrides (cluster-init, cluster-scale, cluster-precheck, test-connection).
+  ## Defaults to repository:appVersion (always RPM variant for shell tools).
+  jobs:
+    repository: ""
+    tag: ""
 
 ## @section Authentication
 auth:
@@ -27,6 +32,14 @@ auth:
   usePasswordFiles: false
   ## Directory where password file is mounted
   passwordFilePath: /opt/valkey/secrets
+  ## Password rotation without pod restart.
+  ## Adds a sidecar that watches the password file and hot-reloads Valkey config.
+  passwordRotation:
+    enabled: false
+    ## Poll interval in seconds
+    interval: 10
+    ## Resources for the password-watcher sidecar
+    resources: {}
 
 ## @section ACL (Access Control List)
 ## Multi-user authentication with per-user command and key restrictions.
@@ -95,6 +108,9 @@ cluster:
   replicasPerPrimary: 1
   nodeTimeout: 15000
   busPort: 16379
+  ## Pre-check safety validation before scale-down operations.
+  ## Runs as a pre-upgrade Helm hook Job. Fails the upgrade if scale-down is unsafe.
+  precheckBeforeScaleDown: true
 
 ## @section Standalone mode settings
 standalone:

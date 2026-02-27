@@ -84,6 +84,15 @@ To list external NodePorts:
 
 {{- end }}
 
+{{- if .Values.auth.passwordRotation.enabled }}
+
+Password rotation is enabled.
+A sidecar watches the password Secret file and hot-reloads Valkey config on change.
+To rotate the password without restarting pods:
+  kubectl patch secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -p '{"data":{"valkey-password":"'"$(echo -n 'NEW_PASSWORD' | base64)"'"}}'
+The sidecar will detect the change within {{ .Values.auth.passwordRotation.interval }} seconds and update Valkey.
+{{- end }}
+
 To run the connection test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
 

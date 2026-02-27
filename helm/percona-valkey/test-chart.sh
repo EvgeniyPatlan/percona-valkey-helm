@@ -122,6 +122,18 @@ test_lint() {
     else
         fail "lint cluster/acl"
     fi
+
+    if helm lint "$CHART_DIR" --set auth.passwordRotation.enabled=true --set auth.password=$PASS > /dev/null 2>&1; then
+        pass "lint password rotation"
+    else
+        fail "lint password rotation"
+    fi
+
+    if helm lint "$CHART_DIR" --set mode=cluster --set cluster.precheckBeforeScaleDown=true > /dev/null 2>&1; then
+        pass "lint cluster precheck"
+    else
+        fail "lint cluster precheck"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2110,6 +2122,116 @@ test_template_render() {
     else
         fail "template ACL + external access: masterauth without requirepass"
     fi
+
+    # --- Feature #16: Scale-down precheck ---
+
+    # Precheck renders only in cluster mode
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/cluster-precheck-job.yaml 2>&1)
+    if echo "$out" | grep -q "cluster-precheck"; then
+        pass "template precheck job present in cluster mode"
+    else
+        fail "template precheck job present in cluster mode"
+    fi
+
+    # Precheck not rendered in standalone
+    if helm template test "$CHART_DIR" --set mode=standalone --show-only templates/cluster-precheck-job.yaml > /dev/null 2>&1; then
+        out=$(helm template test "$CHART_DIR" --set mode=standalone --show-only templates/cluster-precheck-job.yaml 2>&1)
+        if echo "$out" | grep -q "cluster-precheck"; then
+            fail "template precheck job absent in standalone mode"
+        else
+            pass "template precheck job absent in standalone mode"
+        fi
+    else
+        pass "template precheck job absent in standalone mode"
+    fi
+
+    # Precheck disabled when precheckBeforeScaleDown=false
+    if helm template test "$CHART_DIR" --set mode=cluster --set cluster.precheckBeforeScaleDown=false --show-only templates/cluster-precheck-job.yaml > /dev/null 2>&1; then
+        out=$(helm template test "$CHART_DIR" --set mode=cluster --set cluster.precheckBeforeScaleDown=false --show-only templates/cluster-precheck-job.yaml 2>&1)
+        if echo "$out" | grep -q "cluster-precheck"; then
+            fail "template precheck job absent when disabled"
+        else
+            pass "template precheck job absent when disabled"
+        fi
+    else
+        pass "template precheck job absent when disabled"
+    fi
+
+    # Precheck is a pre-upgrade hook
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/cluster-precheck-job.yaml 2>&1)
+    if echo "$out" | grep -q "pre-upgrade"; then
+        pass "template precheck job is pre-upgrade hook"
+    else
+        fail "template precheck job is pre-upgrade hook"
+    fi
+
+    # --- Feature #17: Password rotation ---
+
+    # Sidecar not present by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "password-watcher"; then
+        pass "template password-watcher absent by default"
+    else
+        fail "template password-watcher absent by default"
+    fi
+
+    # Sidecar present when enabled
+    out=$(helm template test "$CHART_DIR" --set auth.passwordRotation.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "password-watcher"; then
+        pass "template password-watcher present when enabled"
+    else
+        fail "template password-watcher present when enabled"
+    fi
+
+    # Password file mount when rotation enabled
+    out=$(helm template test "$CHART_DIR" --set auth.passwordRotation.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-password" && echo "$out" | grep -q "/opt/valkey/secrets"; then
+        pass "template password file mount with rotation"
+    else
+        fail "template password file mount with rotation"
+    fi
+
+    # Probes use file-based password when rotation enabled
+    out=$(helm template test "$CHART_DIR" --set auth.passwordRotation.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'cat /opt/valkey/secrets/valkey-password'; then
+        pass "template probes use file-based password with rotation"
+    else
+        fail "template probes use file-based password with rotation"
+    fi
+
+    # --- Feature #18: Job image override ---
+
+    # Default: Jobs use image.repository:appVersion
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "perconalab/valkey:9.0.3"; then
+        pass "template job default image"
+    else
+        fail "template job default image"
+    fi
+
+    # Custom image.jobs.repository
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set image.jobs.repository=myregistry.io/valkey --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "myregistry.io/valkey:9.0.3"; then
+        pass "template job custom repository"
+    else
+        fail "template job custom repository"
+    fi
+
+    # Custom image.jobs.tag
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set image.jobs.tag=custom-tag --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "perconalab/valkey:custom-tag"; then
+        pass "template job custom tag"
+    else
+        fail "template job custom tag"
+    fi
+
+    # Custom both
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set image.jobs.repository=myregistry.io/valkey --set image.jobs.tag=v1.0 --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "myregistry.io/valkey:v1.0"; then
+        pass "template job custom repository + tag"
+    else
+        fail "template job custom repository + tag"
+    fi
 }
 
 # --- Deployment Tests ---
@@ -4044,6 +4166,143 @@ test_acl_standalone() {
     cleanup "$rel"
 }
 
+# --- Feature #16: Cluster precheck deployment test ---
+
+test_cluster_precheck() {
+    bold "=== TEST: Cluster scale-down precheck ==="
+    local rel="t-precheck"
+    cleanup "$rel"
+
+    # Deploy 6-node cluster
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout $TIMEOUT 2>&1 || { fail "precheck install"; cleanup "$rel"; return; }
+    pass "precheck install (6 nodes)"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "precheck initial 6 pods ready"
+    else
+        fail "precheck initial 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Wait for cluster init to finish
+    sleep 15
+
+    # Verify cluster is OK before testing
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if [ "$state" != "cluster_state:ok" ]; then
+        fail "precheck cluster not OK before test (got: $state)"; cleanup "$rel"; return
+    fi
+    pass "precheck cluster OK before test"
+
+    # Scale to same size (no-op) — should succeed
+    helm upgrade "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set cluster.replicas=6 \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "precheck no-op scale (6->6)"; cleanup "$rel"; return; }
+    pass "precheck no-op scale (6->6) passed"
+
+    # Scale up to 8 — should succeed (not a scale-down)
+    helm upgrade "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set cluster.replicas=8 \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "precheck scale-up (6->8)"; cleanup "$rel"; return; }
+    pass "precheck scale-up (6->8) passed"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 8 300s; then
+        pass "precheck 8 pods ready"
+    else
+        fail "precheck 8 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Wait for scale job
+    sleep 15
+
+    # Scale down 8->6 with replicasPerPrimary=1: 6/(1+1)=3 masters — should pass
+    helm upgrade "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set cluster.replicas=6 \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "precheck safe scale-down (8->6)"; cleanup "$rel"; return; }
+    pass "precheck safe scale-down (8->6) passed"
+
+    cleanup "$rel"
+}
+
+# --- Feature #17: Password rotation deployment test ---
+
+test_password_rotation() {
+    bold "=== TEST: Password rotation without restart ==="
+    local rel="t-passrot"
+    cleanup "$rel"
+
+    # Deploy standalone with password rotation enabled
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set auth.passwordRotation.enabled=true \
+        --set auth.passwordRotation.interval=5 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "rotation install"; cleanup "$rel"; return; }
+    pass "rotation install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1 120s; then
+        pass "rotation pod ready"
+    else
+        fail "rotation pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify sidecar is running
+    local containers=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.containers[*].name}' 2>/dev/null)
+    if echo "$containers" | grep -q "password-watcher"; then
+        pass "rotation sidecar running"
+    else
+        fail "rotation sidecar running"; cleanup "$rel"; return
+    fi
+
+    # Verify ping works with current password
+    local ping=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -c valkey -- sh -c "valkey-cli -a \$(cat /opt/valkey/secrets/valkey-password) ping" 2>/dev/null)
+    if [ "$ping" = "PONG" ]; then
+        pass "rotation initial ping works"
+    else
+        fail "rotation initial ping works (got: $ping)"; cleanup "$rel"; return
+    fi
+
+    # Rotate the password by updating the Secret
+    local new_pass="rotated-pass-$(date +%s)"
+    local new_pass_b64=$(echo -n "$new_pass" | base64)
+    kubectl patch secret ${rel}-percona-valkey -n $NAMESPACE \
+        -p "{\"data\":{\"valkey-password\":\"$new_pass_b64\"}}" 2>/dev/null || { fail "rotation patch secret"; cleanup "$rel"; return; }
+    pass "rotation secret patched"
+
+    # Wait for Kubernetes to propagate + sidecar to detect (interval=5s + propagation)
+    sleep 30
+
+    # Verify ping works with new password
+    ping=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -c valkey -- sh -c "valkey-cli -a \$(cat /opt/valkey/secrets/valkey-password) ping" 2>/dev/null)
+    if [ "$ping" = "PONG" ]; then
+        pass "rotation ping works after rotation"
+    else
+        fail "rotation ping works after rotation (got: $ping)"
+    fi
+
+    # Verify old password no longer works
+    local old_ping=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -c valkey -- sh -c "valkey-cli -a '$PASS' ping" 2>/dev/null)
+    if echo "$old_ping" | grep -q "NOAUTH\|ERR\|WRONGPASS"; then
+        pass "rotation old password rejected"
+    else
+        # If PONG, rotation failed
+        if [ "$old_ping" = "PONG" ]; then
+            fail "rotation old password rejected (still works)"
+        else
+            pass "rotation old password rejected"
+        fi
+    fi
+
+    cleanup "$rel"
+}
+
 # --- Main ---
 
 main() {
@@ -4165,6 +4424,10 @@ main() {
     test_runtime_class
     echo ""
     test_acl_standalone
+    echo ""
+    test_cluster_precheck
+    echo ""
+    test_password_rotation
     echo ""
 
     # Summary

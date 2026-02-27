@@ -251,7 +251,7 @@ spec:
           {{- end }}
           env:
             {{- if .Values.auth.enabled }}
-            {{- if .Values.auth.usePasswordFiles }}
+            {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
             - name: VALKEY_PASSWORD_FILE
               value: {{ .Values.auth.passwordFilePath }}/valkey-password
             {{- else }}
@@ -296,7 +296,11 @@ spec:
                   - -c
                   - |
                     {{- if .Values.auth.enabled }}
+                    {{- if .Values.auth.passwordRotation.enabled }}
+                    AUTH="-a $(cat {{ .Values.auth.passwordFilePath }}/valkey-password)"
+                    {{- else }}
                     AUTH="-a $VALKEY_PASSWORD"
+                    {{- end }}
                     {{- else }}
                     AUTH=""
                     {{- end }}
@@ -321,6 +325,10 @@ spec:
                     valkey-cli $TLS $AUTH shutdown nosave || true
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
+          {{- $passCmd := "$VALKEY_PASSWORD" }}
+          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- $passCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
+          {{- end }}
           livenessProbe:
             exec:
               command:
@@ -329,12 +337,12 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "{{ $passCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -a "{{ $passCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli ping )
                   {{- end }}
@@ -350,6 +358,10 @@ spec:
           {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
           {{- $tlsProbeFlags = printf "-p %d --tls --cacert %s/ca.crt --cert %s/tls.crt --key %s/tls.key" (int .Values.tls.port) .Values.tls.certMountPath .Values.tls.certMountPath .Values.tls.certMountPath }}
           {{- end }}
+          {{- $readyPassCmd := "$VALKEY_PASSWORD" }}
+          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- $readyPassCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
+          {{- end }}
           readinessProbe:
             exec:
               command:
@@ -357,11 +369,11 @@ spec:
                 - -c
                 - |
                   {{- if and (eq .Values.mode "cluster") .Values.auth.enabled }}
-                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "$VALKEY_PASSWORD" cluster info )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "{{ $readyPassCmd }}" cluster info )
                   {{- else if eq .Values.mode "cluster" }}
                   response=$(valkey-cli {{ $tlsProbeFlags }} cluster info )
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "{{ $readyPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli {{ $tlsProbeFlags }} ping )
                   {{- end }}
@@ -377,6 +389,10 @@ spec:
             successThreshold: {{ .Values.readinessProbe.successThreshold }}
           {{- end }}
           {{- if .Values.startupProbe.enabled }}
+          {{- $startPassCmd := "$VALKEY_PASSWORD" }}
+          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- $startPassCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
+          {{- end }}
           startupProbe:
             exec:
               command:
@@ -385,12 +401,12 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "{{ $startPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -a "{{ $startPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli ping )
                   {{- end }}
@@ -410,7 +426,7 @@ spec:
               mountPath: /data
             - name: config
               mountPath: /etc/valkey
-            {{- if and .Values.auth.enabled .Values.auth.usePasswordFiles }}
+            {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
             - name: valkey-password
               mountPath: {{ .Values.auth.passwordFilePath }}
               readOnly: true
@@ -483,6 +499,74 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- if and .Values.auth.enabled .Values.auth.passwordRotation.enabled }}
+        - name: password-watcher
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              PASS_FILE="{{ .Values.auth.passwordFilePath }}/valkey-password"
+              INTERVAL={{ .Values.auth.passwordRotation.interval }}
+              PORT={{ .Values.service.port }}
+              {{- if .Values.tls.enabled }}
+              TLS_FLAGS="{{ include "percona-valkey.tlsCliFlags" . }}"
+              {{- else }}
+              TLS_FLAGS=""
+              {{- end }}
+
+              echo "Password watcher starting (interval: ${INTERVAL}s)"
+              CURRENT=$(cat "$PASS_FILE")
+
+              while true; do
+                sleep "$INTERVAL"
+                NEW=$(cat "$PASS_FILE")
+                [ "$NEW" = "$CURRENT" ] && continue
+
+                echo "Password change detected. Rotating..."
+                # Authenticate with old password and set new requirepass
+                if valkey-cli -p $PORT $TLS_FLAGS -a "$CURRENT" CONFIG SET requirepass "$NEW" 2>/dev/null | grep -q OK; then
+                  echo "  requirepass updated."
+                else
+                  echo "  WARNING: Failed to set requirepass. Trying with new password..."
+                  valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" CONFIG SET requirepass "$NEW" 2>/dev/null || true
+                fi
+
+                # Update masterauth with new password
+                valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" CONFIG SET masterauth "$NEW" 2>/dev/null || true
+                echo "  masterauth updated."
+
+                # If ACL is enabled, update default user
+                if valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" ACL WHOAMI 2>/dev/null | grep -q default; then
+                  valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" ACL SETUSER default on ">$NEW" 2>/dev/null || true
+                  echo "  ACL default user updated."
+                fi
+
+                # Verify the new password works
+                if valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" PING 2>/dev/null | grep -q PONG; then
+                  echo "Password rotated successfully."
+                  CURRENT="$NEW"
+                else
+                  echo "ERROR: Password rotation verification failed!"
+                fi
+              done
+          volumeMounts:
+            - name: valkey-password
+              mountPath: {{ .Values.auth.passwordFilePath }}
+              readOnly: true
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.auth.passwordRotation.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
         {{- with .Values.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -490,7 +574,7 @@ spec:
         - name: config
           configMap:
             name: {{ include "percona-valkey.fullname" . }}
-        {{- if and .Values.auth.enabled .Values.auth.usePasswordFiles }}
+        {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
         - name: valkey-password
           secret:
             secretName: {{ include "percona-valkey.secretName" . }}

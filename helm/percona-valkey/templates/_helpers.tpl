@@ -67,9 +67,18 @@ Hardened variant: perconalab/valkey:9.0.3-hardened
 
 {{/*
 RPM image (always used for Jobs that need shell tools).
+Supports image.jobs.repository and image.jobs.tag overrides for air-gapped environments.
 */}}
 {{- define "percona-valkey.rpmImage" -}}
-{{- printf "%s:%s" .Values.image.repository .Chart.AppVersion -}}
+{{- $repo := .Values.image.repository -}}
+{{- $tag := .Chart.AppVersion -}}
+{{- if and .Values.image.jobs .Values.image.jobs.repository -}}
+  {{- $repo = .Values.image.jobs.repository -}}
+{{- end -}}
+{{- if and .Values.image.jobs .Values.image.jobs.tag -}}
+  {{- $tag = .Values.image.jobs.tag -}}
+{{- end -}}
+{{- printf "%s:%s" $repo $tag -}}
 {{- end }}
 
 {{/*
