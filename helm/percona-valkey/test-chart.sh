@@ -4841,6 +4841,95 @@ test_sentinel_failover() {
     cleanup "$rel"
 }
 
+test_sentinel_hardened() {
+    bold "=== TEST: Sentinel Hardened ==="
+    if [ "$SKIP_HARDENED" = "true" ]; then
+        skip "sentinel hardened (SKIP_HARDENED=true)"
+        return
+    fi
+    local rel="sentinel-hrd"
+    local fullname="${rel}-percona-valkey"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set image.variant=hardened \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "sentinel hardened install"; cleanup "$rel"; return; }
+    pass "sentinel hardened install"
+
+    # Verify 3 sentinel pods running
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3; then
+        pass "sentinel hardened 3 sentinel pods running"
+    else
+        fail "sentinel hardened 3 sentinel pods running"
+    fi
+
+    # Verify 3 data pods running
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3; then
+        pass "sentinel hardened 3 data pods running"
+    else
+        fail "sentinel hardened 3 data pods running"; cleanup "$rel"; return
+    fi
+
+    # Find the actual master pod
+    local master_pod=""
+    for i in 0 1 2; do
+        local r
+        r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+
+    # Ping
+    if kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "sentinel hardened valkey-cli ping"
+    else
+        fail "sentinel hardened valkey-cli ping"
+    fi
+
+    # Set/Get
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set shrd-key shrd-value > /dev/null 2>&1
+    local val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS get shrd-key 2>/dev/null)
+    if echo "$val" | grep -q "shrd-value"; then
+        pass "sentinel hardened set/get"
+    else
+        fail "sentinel hardened set/get (got: $val)"
+    fi
+
+    # Verify hardened security context on data pod
+    local ro=$(kubectl get pod ${fullname}-0 -n $NAMESPACE -o jsonpath='{.spec.containers[?(@.name=="valkey")].securityContext.readOnlyRootFilesystem}' 2>/dev/null)
+    if [ "$ro" = "true" ]; then
+        pass "sentinel hardened data pod readOnlyRootFilesystem"
+    else
+        fail "sentinel hardened data pod readOnlyRootFilesystem (got: $ro)"
+    fi
+
+    # Verify hardened security context on sentinel pod
+    local sro=$(kubectl get pod ${fullname}-sentinel-0 -n $NAMESPACE -o jsonpath='{.spec.containers[?(@.name=="sentinel")].securityContext.readOnlyRootFilesystem}' 2>/dev/null)
+    if [ "$sro" = "true" ]; then
+        pass "sentinel hardened sentinel pod readOnlyRootFilesystem"
+    else
+        fail "sentinel hardened sentinel pod readOnlyRootFilesystem (got: $sro)"
+    fi
+
+    # Helm test
+    if helm test "$rel" -n $NAMESPACE --timeout 60s > /dev/null 2>&1; then
+        pass "sentinel hardened helm test"
+    else
+        fail "sentinel hardened helm test"
+    fi
+
+    cleanup "$rel"
+}
+
 # --- Main ---
 
 main() {
@@ -4972,6 +5061,8 @@ main() {
     test_sentinel_rpm
     echo ""
     test_sentinel_failover
+    echo ""
+    test_sentinel_hardened
     echo ""
 
     # Summary
