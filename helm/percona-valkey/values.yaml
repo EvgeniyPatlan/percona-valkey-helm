@@ -1,6 +1,16 @@
 ## @section Global parameters
+global:
+  ## Global image registry override. Prepended to all image repositories.
+  imageRegistry: ""
+
 nameOverride: ""
 fullnameOverride: ""
+
+## Additional labels applied to all resources
+commonLabels: {}
+
+## Kubernetes cluster domain
+clusterDomain: cluster.local
 
 ## @section Deployment mode
 ## "standalone", "cluster", or "sentinel"

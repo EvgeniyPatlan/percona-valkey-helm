@@ -152,6 +152,24 @@ test_lint() {
     else
         fail "lint sentinel/hardened"
     fi
+
+    if helm lint "$CHART_DIR" --set global.imageRegistry=myregistry.io > /dev/null 2>&1; then
+        pass "lint global.imageRegistry"
+    else
+        fail "lint global.imageRegistry"
+    fi
+
+    if helm lint "$CHART_DIR" --set commonLabels.team=platform > /dev/null 2>&1; then
+        pass "lint commonLabels"
+    else
+        fail "lint commonLabels"
+    fi
+
+    if helm lint "$CHART_DIR" --set clusterDomain=custom.domain > /dev/null 2>&1; then
+        pass "lint clusterDomain"
+    else
+        fail "lint clusterDomain"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2505,6 +2523,203 @@ test_template_render() {
         pass "template sentinel no cluster-init job"
     else
         fail "template sentinel no cluster-init job"
+    fi
+
+    # --- global.imageRegistry tests ---
+
+    # Main image has registry prefix in statefulset
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template global.imageRegistry main image in statefulset"
+    else
+        fail "template global.imageRegistry main image in statefulset"
+    fi
+
+    # RPM image has registry prefix in cluster-init-job
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set mode=cluster --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template global.imageRegistry rpm image in cluster-init-job"
+    else
+        fail "template global.imageRegistry rpm image in cluster-init-job"
+    fi
+
+    # Metrics image has registry prefix in statefulset
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set metrics.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/oliver006/redis_exporter:"; then
+        pass "template global.imageRegistry metrics image in statefulset"
+    else
+        fail "template global.imageRegistry metrics image in statefulset"
+    fi
+
+    # Registry prefix works in sentinel-statefulset
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set mode=sentinel --show-only templates/sentinel-statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template global.imageRegistry in sentinel-statefulset"
+    else
+        fail "template global.imageRegistry in sentinel-statefulset"
+    fi
+
+    # Without registry, no leading / in image
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep "image:" | grep -q "image: /"; then
+        fail "template no leading / without global.imageRegistry"
+    else
+        pass "template no leading / without global.imageRegistry"
+    fi
+
+    # Jobs image override + global registry combined
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set image.jobs.repository=custom/valkey --set mode=cluster --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/custom/valkey:"; then
+        pass "template global.imageRegistry + jobs override combined"
+    else
+        fail "template global.imageRegistry + jobs override combined"
+    fi
+
+    # Registry works in backup-cronjob
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set backup.enabled=true --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template global.imageRegistry in backup-cronjob"
+    else
+        fail "template global.imageRegistry in backup-cronjob"
+    fi
+
+    # Registry works in cluster-scale-job
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io --set mode=cluster --show-only templates/cluster-scale-job.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template global.imageRegistry in cluster-scale-job"
+    else
+        fail "template global.imageRegistry in cluster-scale-job"
+    fi
+
+    # --- commonLabels tests ---
+
+    # StatefulSet labels include commonLabels
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "team: platform"; then
+        pass "template commonLabels in StatefulSet"
+    else
+        fail "template commonLabels in StatefulSet"
+    fi
+
+    # Service labels include commonLabels
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "team: platform"; then
+        pass "template commonLabels in Service"
+    else
+        fail "template commonLabels in Service"
+    fi
+
+    # ConfigMap labels include commonLabels
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "team: platform"; then
+        pass "template commonLabels in ConfigMap"
+    else
+        fail "template commonLabels in ConfigMap"
+    fi
+
+    # Secret labels include commonLabels
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "team: platform"; then
+        pass "template commonLabels in Secret"
+    else
+        fail "template commonLabels in Secret"
+    fi
+
+    # commonLabels NOT in selector.matchLabels
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --show-only templates/statefulset.yaml 2>&1)
+    MATCH_LABELS=$(echo "$out" | sed -n '/matchLabels:/,/template:/p')
+    if echo "$MATCH_LABELS" | grep -q "team: platform"; then
+        fail "template commonLabels NOT in matchLabels"
+    else
+        pass "template commonLabels NOT in matchLabels"
+    fi
+
+    # Multiple commonLabels values present
+    out=$(helm template test "$CHART_DIR" --set commonLabels.team=platform --set commonLabels.env=prod --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "team: platform" && echo "$out" | grep -q "env: prod"; then
+        pass "template multiple commonLabels present"
+    else
+        fail "template multiple commonLabels present"
+    fi
+
+    # --- clusterDomain tests ---
+
+    # Default domain in replicaof (statefulset)
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "svc.cluster.local"; then
+        pass "template default clusterDomain in statefulset replicaof"
+    else
+        fail "template default clusterDomain in statefulset replicaof"
+    fi
+
+    # Custom domain in replicaof (statefulset)
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set clusterDomain=custom.domain --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "svc.custom.domain"; then
+        pass "template custom clusterDomain in statefulset replicaof"
+    else
+        fail "template custom clusterDomain in statefulset replicaof"
+    fi
+
+    # Custom domain in cluster-init-job HEADLESS
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set clusterDomain=custom.domain --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q "svc.custom.domain"; then
+        pass "template custom clusterDomain in cluster-init-job"
+    else
+        fail "template custom clusterDomain in cluster-init-job"
+    fi
+
+    # Custom domain in sentinel-configmap monitor
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set clusterDomain=custom.domain --show-only templates/sentinel-configmap.yaml 2>&1)
+    if echo "$out" | grep -q "svc.custom.domain"; then
+        pass "template custom clusterDomain in sentinel-configmap"
+    else
+        fail "template custom clusterDomain in sentinel-configmap"
+    fi
+
+    # Custom domain in certificate DNS SANs
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.certManager.enabled=true --set tls.certManager.issuerRef.name=my-issuer --set clusterDomain=custom.domain --show-only templates/certificate.yaml 2>&1)
+    if echo "$out" | grep -q "svc.custom.domain"; then
+        pass "template custom clusterDomain in certificate DNS SANs"
+    else
+        fail "template custom clusterDomain in certificate DNS SANs"
+    fi
+
+    # Custom domain in backup-cronjob HEADLESS
+    out=$(helm template test "$CHART_DIR" --set backup.enabled=true --set clusterDomain=custom.domain --show-only templates/backup-cronjob.yaml 2>&1)
+    if echo "$out" | grep -q "svc.custom.domain"; then
+        pass "template custom clusterDomain in backup-cronjob"
+    else
+        fail "template custom clusterDomain in backup-cronjob"
+    fi
+
+    # --- Schema validation tests ---
+
+    # Invalid mode value rejected
+    if helm template test "$CHART_DIR" --set mode=invalid 2>&1 | grep -qi "fail\|error\|invalid\|enum"; then
+        pass "template schema rejects invalid mode"
+    else
+        fail "template schema rejects invalid mode"
+    fi
+
+    # Invalid image variant rejected
+    if helm template test "$CHART_DIR" --set image.variant=invalid 2>&1 | grep -qi "fail\|error\|invalid\|enum"; then
+        pass "template schema rejects invalid image.variant"
+    else
+        fail "template schema rejects invalid image.variant"
+    fi
+
+    # Valid default values pass schema
+    if helm template test "$CHART_DIR" > /dev/null 2>&1; then
+        pass "template schema valid default values pass"
+    else
+        fail "template schema valid default values pass"
+    fi
+
+    # Invalid type rejected (string where object expected)
+    if helm template test "$CHART_DIR" --set auth=notanobject 2>&1 | grep -qi "fail\|error\|invalid\|expected"; then
+        pass "template schema rejects invalid type"
+    else
+        fail "template schema rejects invalid type"
     fi
 }
 

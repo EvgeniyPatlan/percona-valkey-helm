@@ -21,22 +21,22 @@ spec:
     - {{ $fullname }}
     - {{ $fullname }}.{{ .Release.Namespace }}
     - {{ $fullname }}.{{ .Release.Namespace }}.svc
-    - {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
     - {{ $fullname }}-headless
     - {{ $fullname }}-headless.{{ .Release.Namespace }}
     - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc
-    - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local
-    - "*.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+    - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
+    - "*.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
     {{- if eq .Values.mode "sentinel" }}
     - {{ $fullname }}-sentinel
     - {{ $fullname }}-sentinel.{{ .Release.Namespace }}
     - {{ $fullname }}-sentinel.{{ .Release.Namespace }}.svc
-    - {{ $fullname }}-sentinel.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ $fullname }}-sentinel.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
     - {{ $fullname }}-sentinel-headless
     - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}
     - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc
-    - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.cluster.local
-    - "*.{{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.cluster.local"
+    - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
+    - "*.{{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
     {{- end }}
     - localhost
     {{- range .Values.tls.certManager.additionalDnsNames }}

@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/component: sentinel
 data:
   sentinel.conf: |
-    sentinel monitor {{ .Values.sentinel.masterSet }} {{ $fullname }}-0.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local {{ .Values.service.port }} {{ .Values.sentinel.quorum }}
+    sentinel monitor {{ .Values.sentinel.masterSet }} {{ $fullname }}-0.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }} {{ .Values.service.port }} {{ .Values.sentinel.quorum }}
     sentinel resolve-hostnames yes
     sentinel announce-hostnames yes
     sentinel down-after-milliseconds {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.downAfterMilliseconds }}

@@ -38,6 +38,9 @@ helm.sh/chart: {{ include "percona-valkey.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Values.commonLabels }}
+{{ toYaml . }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -62,7 +65,11 @@ Hardened variant: perconalab/valkey:9.0.3-hardened
     {{- $tag = .Chart.AppVersion -}}
   {{- end -}}
 {{- end -}}
-{{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- $repo := .Values.image.repository -}}
+{{- if and .Values.global .Values.global.imageRegistry -}}
+  {{- $repo = printf "%s/%s" .Values.global.imageRegistry $repo -}}
+{{- end -}}
+{{- printf "%s:%s" $repo $tag -}}
 {{- end }}
 
 {{/*
@@ -78,7 +85,21 @@ Supports image.jobs.repository and image.jobs.tag overrides for air-gapped envir
 {{- if and .Values.image.jobs .Values.image.jobs.tag -}}
   {{- $tag = .Values.image.jobs.tag -}}
 {{- end -}}
+{{- if and .Values.global .Values.global.imageRegistry -}}
+  {{- $repo = printf "%s/%s" .Values.global.imageRegistry $repo -}}
+{{- end -}}
 {{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{/*
+Metrics exporter image with optional global registry prefix.
+*/}}
+{{- define "percona-valkey.metricsImage" -}}
+{{- $repo := .Values.metrics.image.repository -}}
+{{- if and .Values.global .Values.global.imageRegistry -}}
+  {{- $repo = printf "%s/%s" .Values.global.imageRegistry $repo -}}
+{{- end -}}
+{{- printf "%s:%s" $repo .Values.metrics.image.tag -}}
 {{- end }}
 
 {{/*

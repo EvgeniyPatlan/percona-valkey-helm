@@ -63,7 +63,7 @@ spec:
                 - |
                   set -e
 
-                  HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+                  HEADLESS="{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
                   HOST="{{ $fullname }}-{{ .Values.backup.sourceOrdinal }}.${HEADLESS}"
                   {{- if .Values.tls.enabled }}
                   PORT={{ $tlsPort }}
