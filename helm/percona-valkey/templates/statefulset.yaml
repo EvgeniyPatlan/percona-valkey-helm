@@ -538,12 +538,12 @@ spec:
                 # Update masterauth with new password
                 valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" CONFIG SET masterauth "$NEW" 2>/dev/null || true
                 echo "  masterauth updated."
+                {{- if .Values.acl.enabled }}
 
-                # If ACL is enabled, update default user
-                if valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" ACL WHOAMI 2>/dev/null | grep -q default; then
-                  valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" ACL SETUSER default on ">$NEW" 2>/dev/null || true
-                  echo "  ACL default user updated."
-                fi
+                # ACL is enabled — update default user (resetpass clears old passwords)
+                valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" ACL SETUSER default on resetpass ">$NEW" ~* "&*" +@all 2>/dev/null || true
+                echo "  ACL default user updated."
+                {{- end }}
 
                 # Verify the new password works
                 if valkey-cli -p $PORT $TLS_FLAGS -a "$NEW" PING 2>/dev/null | grep -q PONG; then

@@ -4276,8 +4276,8 @@ test_password_rotation() {
         -p "{\"data\":{\"valkey-password\":\"$new_pass_b64\"}}" 2>/dev/null || { fail "rotation patch secret"; cleanup "$rel"; return; }
     pass "rotation secret patched"
 
-    # Wait for Kubernetes to propagate + sidecar to detect (interval=5s + propagation)
-    sleep 30
+    # Wait for Kubernetes Secret file propagation (kubelet sync can take 60-90s) + sidecar detect
+    sleep 90
 
     # Verify ping works with new password
     ping=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -c valkey -- sh -c "valkey-cli -a \$(cat /opt/valkey/secrets/valkey-password) ping" 2>/dev/null)
