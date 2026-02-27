@@ -355,6 +355,23 @@ podAntiAffinityPreset:
   type: ""
   topologyKey: "kubernetes.io/hostname"
 
+## @section Runtime class
+## Runtime class name for selecting a container runtime (e.g. gVisor, Kata)
+runtimeClassName: ""
+
+## @section DNS configuration
+## Override the pod DNS policy (default: ClusterFirst)
+dnsPolicy: ""
+## Custom DNS configuration
+dnsConfig: {}
+  # nameservers:
+  #   - 8.8.8.8
+  # searches:
+  #   - my-domain.local
+  # options:
+  #   - name: ndots
+  #     value: "5"
+
 ## @section Node placement
 nodeSelector: {}
 tolerations: []

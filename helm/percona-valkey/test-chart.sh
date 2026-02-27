@@ -1981,6 +1981,42 @@ test_template_render() {
     else
         fail "template no read service in cluster mode"
     fi
+
+    # --- Runtime class ---
+    out=$(helm template test "$CHART_DIR" --set runtimeClassName=gvisor --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "runtimeClassName: gvisor"; then
+        pass "template runtimeClassName"
+    else
+        fail "template runtimeClassName"
+    fi
+
+    # No runtimeClassName by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "runtimeClassName"; then
+        pass "template no runtimeClassName by default"
+    else
+        fail "template no runtimeClassName by default"
+    fi
+
+    # --- DNS config/policy ---
+    out=$(helm template test "$CHART_DIR" --set dnsPolicy=None \
+        --set 'dnsConfig.nameservers[0]=8.8.8.8' \
+        --set 'dnsConfig.options[0].name=ndots' \
+        --set 'dnsConfig.options[0].value=5' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "dnsPolicy: None" && echo "$out" | grep -q "8.8.8.8" && echo "$out" | grep -q "ndots"; then
+        pass "template dnsPolicy and dnsConfig"
+    else
+        fail "template dnsPolicy and dnsConfig"
+    fi
+
+    # No dnsPolicy/dnsConfig by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "dnsPolicy" && ! echo "$out" | grep -q "dnsConfig"; then
+        pass "template no dnsPolicy/dnsConfig by default"
+    else
+        fail "template no dnsPolicy/dnsConfig by default"
+    fi
 }
 
 # --- Deployment Tests ---
@@ -3545,6 +3581,332 @@ test_naming_overrides() {
     done
 }
 
+test_extra_init_containers() {
+    bold "=== TEST: Extra init containers ==="
+    local rel="t-extrainit"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set 'extraInitContainers[0].name=my-init' \
+        --set 'extraInitContainers[0].image=busybox:latest' \
+        --set 'extraInitContainers[0].command[0]=sh' \
+        --set 'extraInitContainers[0].command[1]=-c' \
+        --set 'extraInitContainers[0].command[2]=echo init-done > /data/init-marker' \
+        --set 'extraInitContainers[0].volumeMounts[0].name=data' \
+        --set 'extraInitContainers[0].volumeMounts[0].mountPath=/data' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "extraInitContainers install"; cleanup "$rel"; return; }
+    pass "extraInitContainers install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "extraInitContainers pod ready"
+    else
+        fail "extraInitContainers pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify init container ran and wrote the marker file
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- cat /data/init-marker 2>/dev/null)
+    if [ "$val" = "init-done" ]; then
+        pass "extraInitContainers marker file written"
+    else
+        fail "extraInitContainers marker file (got: '$val')"
+    fi
+
+    cleanup "$rel"
+}
+
+test_extra_containers() {
+    bold "=== TEST: Extra sidecar containers ==="
+    local rel="t-extrasidecar"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set 'extraContainers[0].name=log-tailer' \
+        --set 'extraContainers[0].image=busybox:latest' \
+        --set 'extraContainers[0].command[0]=sh' \
+        --set 'extraContainers[0].command[1]=-c' \
+        --set 'extraContainers[0].command[2]=while true; do sleep 3600; done' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "extraContainers install"; cleanup "$rel"; return; }
+    pass "extraContainers install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "extraContainers pod ready"
+    else
+        fail "extraContainers pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify sidecar container exists and is running
+    local status=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.status.containerStatuses[?(@.name=="log-tailer")].ready}' 2>/dev/null)
+    if [ "$status" = "true" ]; then
+        pass "extraContainers sidecar running"
+    else
+        fail "extraContainers sidecar running (status: $status)"
+    fi
+
+    # Verify valkey still works alongside sidecar
+    if kubectl exec ${rel}-percona-valkey-0 -c valkey -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "extraContainers valkey-cli ping"
+    else
+        fail "extraContainers valkey-cli ping"
+    fi
+
+    cleanup "$rel"
+}
+
+test_anti_affinity_preset() {
+    bold "=== TEST: Pod anti-affinity preset ==="
+    local rel="t-antiaffinity"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set podAntiAffinityPreset.type=soft \
+        --set podAntiAffinityPreset.topologyKey=kubernetes.io/hostname \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "anti-affinity install"; cleanup "$rel"; return; }
+    pass "anti-affinity install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "anti-affinity pod ready"
+    else
+        fail "anti-affinity pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify pod spec has the anti-affinity rule
+    local affinity=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey}' 2>/dev/null)
+    if [ "$affinity" = "kubernetes.io/hostname" ]; then
+        pass "anti-affinity soft preset applied"
+    else
+        fail "anti-affinity soft preset (got: '$affinity')"
+    fi
+
+    # Verify valkey works
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "anti-affinity valkey-cli ping"
+    else
+        fail "anti-affinity valkey-cli ping"
+    fi
+
+    cleanup "$rel"
+}
+
+test_termination_grace_period() {
+    bold "=== TEST: Termination grace period ==="
+    local rel="t-termgrace"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set terminationGracePeriodSeconds=120 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "termination-grace install"; cleanup "$rel"; return; }
+    pass "termination-grace install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "termination-grace pod ready"
+    else
+        fail "termination-grace pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify terminationGracePeriodSeconds in pod spec
+    local grace=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.terminationGracePeriodSeconds}' 2>/dev/null)
+    if [ "$grace" = "120" ]; then
+        pass "termination-grace period 120s in pod spec"
+    else
+        fail "termination-grace period (got: '$grace')"
+    fi
+
+    cleanup "$rel"
+}
+
+test_priority_class() {
+    bold "=== TEST: Priority class ==="
+    local rel="t-priority"
+    cleanup "$rel"
+
+    # Create a PriorityClass for testing
+    kubectl apply -f - <<'PCEOF' 2>/dev/null || true
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: valkey-test-priority
+value: 1000
+globalDefault: false
+description: "Test priority class for Valkey"
+PCEOF
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set priorityClassName=valkey-test-priority \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "priority-class install"; cleanup "$rel"; kubectl delete priorityclass valkey-test-priority 2>/dev/null; return; }
+    pass "priority-class install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "priority-class pod ready"
+    else
+        fail "priority-class pod ready"; cleanup "$rel"; kubectl delete priorityclass valkey-test-priority 2>/dev/null; return
+    fi
+
+    # Verify priorityClassName in pod spec
+    local pc=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.priorityClassName}' 2>/dev/null)
+    if [ "$pc" = "valkey-test-priority" ]; then
+        pass "priority-class applied to pod"
+    else
+        fail "priority-class (got: '$pc')"
+    fi
+
+    cleanup "$rel"
+    kubectl delete priorityclass valkey-test-priority 2>/dev/null || true
+}
+
+test_topology_spread() {
+    bold "=== TEST: Topology spread constraints ==="
+    local rel="t-topospr"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set 'topologySpreadConstraints[0].maxSkew=1' \
+        --set 'topologySpreadConstraints[0].topologyKey=kubernetes.io/hostname' \
+        --set 'topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway' \
+        --set 'topologySpreadConstraints[0].labelSelector.matchLabels.app\.kubernetes\.io/name=percona-valkey' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "topology-spread install"; cleanup "$rel"; return; }
+    pass "topology-spread install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "topology-spread pod ready"
+    else
+        fail "topology-spread pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify topologySpreadConstraints in pod spec
+    local topo=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.topologySpreadConstraints[0].topologyKey}' 2>/dev/null)
+    if [ "$topo" = "kubernetes.io/hostname" ]; then
+        pass "topology-spread constraint applied"
+    else
+        fail "topology-spread constraint (got: '$topo')"
+    fi
+
+    cleanup "$rel"
+}
+
+test_read_service() {
+    bold "=== TEST: Read service (standalone replicas) ==="
+    local rel="t-readsvc"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set standalone.replicas=2 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "read-service install"; cleanup "$rel"; return; }
+    pass "read-service install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+        pass "read-service 2 pods ready"
+    else
+        fail "read-service 2 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify the read service exists
+    if kubectl get svc ${rel}-percona-valkey-read -n $NAMESPACE > /dev/null 2>&1; then
+        pass "read-service exists"
+    else
+        fail "read-service exists"; cleanup "$rel"; return
+    fi
+
+    # Verify read service has correct type
+    local svc_type=$(kubectl get svc ${rel}-percona-valkey-read -n $NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null)
+    if [ "$svc_type" = "ClusterIP" ]; then
+        pass "read-service type ClusterIP"
+    else
+        fail "read-service type (got: '$svc_type')"
+    fi
+
+    # Verify read service has the valkey port
+    local port=$(kubectl get svc ${rel}-percona-valkey-read -n $NAMESPACE -o jsonpath='{.spec.ports[?(@.name=="valkey")].port}' 2>/dev/null)
+    if [ "$port" = "6379" ]; then
+        pass "read-service port 6379"
+    else
+        fail "read-service port (got: '$port')"
+    fi
+
+    # Verify connectivity through read service
+    local read_ip=$(kubectl get svc ${rel}-percona-valkey-read -n $NAMESPACE -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -h "$read_ip" -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "read-service ping via ClusterIP"
+    else
+        fail "read-service ping via ClusterIP"
+    fi
+
+    cleanup "$rel"
+}
+
+test_dns_config() {
+    bold "=== TEST: DNS config and policy ==="
+    local rel="t-dns"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set dnsPolicy=ClusterFirst \
+        --set 'dnsConfig.options[0].name=ndots' \
+        --set 'dnsConfig.options[0].value=3' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "dns-config install"; cleanup "$rel"; return; }
+    pass "dns-config install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "dns-config pod ready"
+    else
+        fail "dns-config pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify dnsPolicy in pod spec
+    local policy=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.dnsPolicy}' 2>/dev/null)
+    if [ "$policy" = "ClusterFirst" ]; then
+        pass "dns-config policy ClusterFirst"
+    else
+        fail "dns-config policy (got: '$policy')"
+    fi
+
+    # Verify dnsConfig ndots
+    local ndots=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.dnsConfig.options[0].name}' 2>/dev/null)
+    if [ "$ndots" = "ndots" ]; then
+        pass "dns-config ndots option present"
+    else
+        fail "dns-config ndots (got: '$ndots')"
+    fi
+
+    # Verify valkey works with custom DNS
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "dns-config valkey-cli ping"
+    else
+        fail "dns-config valkey-cli ping"
+    fi
+
+    cleanup "$rel"
+}
+
+test_runtime_class() {
+    bold "=== TEST: Runtime class ==="
+    local rel="t-runtime"
+
+    # Template-only test: runtimeClassName renders correctly
+    # Deployment test skipped because it requires a specific RuntimeClass on the cluster
+    local out=$(helm template "$rel" "$CHART_DIR" --set runtimeClassName=my-runtime --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "runtimeClassName: my-runtime"; then
+        pass "runtime-class renders in template"
+    else
+        fail "runtime-class renders in template"
+    fi
+
+    # Verify it doesn't appear by default
+    out=$(helm template "$rel" "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "runtimeClassName"; then
+        pass "runtime-class absent by default"
+    else
+        fail "runtime-class absent by default"
+    fi
+}
+
 # --- Main ---
 
 main() {
@@ -3646,6 +4008,24 @@ main() {
     test_cluster_scale_up
     echo ""
     test_cluster_scale_down
+    echo ""
+    test_extra_init_containers
+    echo ""
+    test_extra_containers
+    echo ""
+    test_anti_affinity_preset
+    echo ""
+    test_termination_grace_period
+    echo ""
+    test_priority_class
+    echo ""
+    test_topology_spread
+    echo ""
+    test_read_service
+    echo ""
+    test_dns_config
+    echo ""
+    test_runtime_class
     echo ""
 
     # Summary
