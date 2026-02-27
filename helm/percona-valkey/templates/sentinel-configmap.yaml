@@ -1,0 +1,30 @@
+{{- if eq .Values.mode "sentinel" }}
+{{- $fullname := include "percona-valkey.fullname" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-sentinel
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sentinel
+data:
+  sentinel.conf: |
+    sentinel monitor {{ .Values.sentinel.masterSet }} {{ $fullname }}-0.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local {{ .Values.service.port }} {{ .Values.sentinel.quorum }}
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+    sentinel down-after-milliseconds {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.downAfterMilliseconds }}
+    sentinel failover-timeout {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.failoverTimeout }}
+    sentinel parallel-syncs {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.parallelSyncs }}
+    {{- if .Values.tls.enabled }}
+    tls-port {{ .Values.sentinel.port }}
+    port 0
+    tls-cert-file {{ .Values.tls.certMountPath }}/tls.crt
+    tls-key-file {{ .Values.tls.certMountPath }}/tls.key
+    tls-ca-cert-file {{ .Values.tls.certMountPath }}/ca.crt
+    tls-auth-clients {{ .Values.tls.authClients }}
+    tls-replication yes
+    {{- else }}
+    port {{ .Values.sentinel.port }}
+    {{- end }}
+{{- end }}

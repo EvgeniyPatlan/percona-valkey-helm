@@ -54,11 +54,16 @@ data:
     tls-cluster yes
     {{- end }}
     {{- end }}
+    {{- if and (eq .Values.mode "sentinel") .Values.tls.enabled }}
+    tls-replication yes
+    {{- end }}
     {{- $cmds := .Values.disableCommands }}
     {{- if and (eq .Values.mode "standalone") .Values.disableCommandsStandalone }}
     {{- $cmds = .Values.disableCommandsStandalone }}
     {{- else if and (eq .Values.mode "cluster") .Values.disableCommandsCluster }}
     {{- $cmds = .Values.disableCommandsCluster }}
+    {{- else if and (eq .Values.mode "sentinel") .Values.disableCommandsSentinel }}
+    {{- $cmds = .Values.disableCommandsSentinel }}
     {{- end }}
     {{- if .Values.acl.enabled }}
     # ACL configuration

@@ -245,6 +245,28 @@ spec:
               EXTRA_ARGS="$EXTRA_ARGS {{ .Values.config.extraFlags }}"
               {{- end }}
               exec valkey-server /etc/valkey/valkey.conf $EXTRA_ARGS
+          {{- else if eq .Values.mode "sentinel" }}
+          command:
+            - sh
+            - -c
+            - |
+              HOSTNAME=$(hostname)
+              ORDINAL=${HOSTNAME##*-}
+              EXTRA_ARGS=""
+              {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
+              {{- if .Values.acl.enabled }}
+              EXTRA_ARGS="$EXTRA_ARGS --masterauth $VALKEY_PASSWORD"
+              {{- else }}
+              EXTRA_ARGS="$EXTRA_ARGS --requirepass $VALKEY_PASSWORD --masterauth $VALKEY_PASSWORD"
+              {{- end }}
+              {{- end }}
+              {{- if .Values.config.extraFlags }}
+              EXTRA_ARGS="$EXTRA_ARGS {{ .Values.config.extraFlags }}"
+              {{- end }}
+              if [ "$ORDINAL" != "0" ]; then
+                EXTRA_ARGS="$EXTRA_ARGS --replicaof {{ include "percona-valkey.fullname" . }}-0.{{ include "percona-valkey.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local {{ .Values.service.port }}"
+              fi
+              exec valkey-server /etc/valkey/valkey.conf $EXTRA_ARGS
           {{- else }}
           args:
             - /etc/valkey/valkey.conf
@@ -313,6 +335,44 @@ spec:
                     case "$ROLE" in
                       master*)
                         valkey-cli $TLS $AUTH cluster failover
+                        i=0
+                        while [ $i -lt 20 ]; do
+                          NEWROLE=$(valkey-cli $TLS $AUTH role)
+                          case "$NEWROLE" in slave*|replica*) break;; esac
+                          sleep 0.5
+                          i=$((i+1))
+                        done
+                        ;;
+                    esac
+                    valkey-cli $TLS $AUTH shutdown nosave || true
+          {{- else if and (eq .Values.mode "sentinel") .Values.gracefulFailover.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    {{- if .Values.auth.enabled }}
+                    {{- if .Values.auth.passwordRotation.enabled }}
+                    AUTH="-a $(cat {{ .Values.auth.passwordFilePath }}/valkey-password)"
+                    {{- else }}
+                    AUTH="-a $VALKEY_PASSWORD"
+                    {{- end }}
+                    {{- else }}
+                    AUTH=""
+                    {{- end }}
+                    {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+                    SENTINEL_TLS="-p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+                    {{- else }}
+                    TLS=""
+                    SENTINEL_TLS="-p {{ .Values.sentinel.port }}"
+                    {{- end }}
+                    ROLE=$(valkey-cli $TLS $AUTH role)
+                    case "$ROLE" in
+                      master*)
+                        valkey-cli -h {{ include "percona-valkey.fullname" . }}-sentinel $SENTINEL_TLS $AUTH SENTINEL FAILOVER {{ .Values.sentinel.masterSet }} || true
                         i=0
                         while [ $i -lt 20 ]; do
                           NEWROLE=$(valkey-cli $TLS $AUTH role)

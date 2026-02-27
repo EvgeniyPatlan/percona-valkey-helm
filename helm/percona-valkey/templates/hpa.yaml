@@ -1,4 +1,4 @@
-{{- if and .Values.autoscaling.hpa.enabled (ne .Values.mode "cluster") }}
+{{- if and .Values.autoscaling.hpa.enabled (eq .Values.mode "standalone") }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

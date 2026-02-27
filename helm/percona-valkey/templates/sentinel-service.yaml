@@ -1,0 +1,25 @@
+{{- if eq .Values.mode "sentinel" }}
+{{- $fullname := include "percona-valkey.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-sentinel
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sentinel
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: sentinel
+      port: {{ .Values.sentinel.port }}
+      targetPort: sentinel
+      protocol: TCP
+  selector:
+    {{- include "percona-valkey.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: sentinel
+{{- end }}

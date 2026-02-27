@@ -142,6 +142,8 @@ Replica count based on mode.
 {{- define "percona-valkey.replicaCount" -}}
 {{- if eq .Values.mode "cluster" }}
 {{- .Values.cluster.replicas }}
+{{- else if eq .Values.mode "sentinel" }}
+{{- .Values.sentinel.replicas }}
 {{- else }}
 {{- .Values.standalone.replicas }}
 {{- end }}
@@ -271,5 +273,5 @@ Nil-safe check for externalAccess.enabled AND standalone mode.
 Returns "true" (string) if both conditions met, empty string otherwise.
 */}}
 {{- define "percona-valkey.externalAccessStandalone" -}}
-{{- if and (include "percona-valkey.externalAccessEnabled" .) (ne .Values.mode "cluster") }}true{{- end }}
+{{- if and (include "percona-valkey.externalAccessEnabled" .) (eq .Values.mode "standalone") }}true{{- end }}
 {{- end }}

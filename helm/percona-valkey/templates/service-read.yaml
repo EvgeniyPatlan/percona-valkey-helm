@@ -1,4 +1,4 @@
-{{- if and (ne .Values.mode "cluster") (gt (int .Values.standalone.replicas) 1) }}
+{{- if or (and (eq .Values.mode "standalone") (gt (int .Values.standalone.replicas) 1)) (and (eq .Values.mode "sentinel") (gt (int .Values.sentinel.replicas) 1)) }}
 apiVersion: v1
 kind: Service
 metadata:

@@ -140,6 +140,18 @@ test_lint() {
     else
         fail "lint backup enabled"
     fi
+
+    if helm lint "$CHART_DIR" --set mode=sentinel > /dev/null 2>&1; then
+        pass "lint sentinel/rpm"
+    else
+        fail "lint sentinel/rpm"
+    fi
+
+    if helm lint "$CHART_DIR" --set mode=sentinel,image.variant=hardened > /dev/null 2>&1; then
+        pass "lint sentinel/hardened"
+    else
+        fail "lint sentinel/hardened"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2327,6 +2339,173 @@ test_template_render() {
     else
         fail "template backup CronJob uses custom job image"
     fi
+
+    # --- Sentinel template tests ---
+
+    # Sentinel full render succeeds
+    if helm template test "$CHART_DIR" --set mode=sentinel > /dev/null 2>&1; then
+        pass "template sentinel full render"
+    else
+        fail "template sentinel full render"
+    fi
+
+    # Sentinel StatefulSet renders with correct replicas
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/sentinel-statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "replicas: 3"; then
+        pass "template sentinel StatefulSet replicas"
+    else
+        fail "template sentinel StatefulSet replicas"
+    fi
+
+    # Sentinel ConfigMap has sentinel monitor and resolve-hostnames
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/sentinel-configmap.yaml 2>&1)
+    if echo "$out" | grep -q "sentinel monitor mymaster" && echo "$out" | grep -q "resolve-hostnames yes"; then
+        pass "template sentinel ConfigMap monitor + resolve-hostnames"
+    else
+        fail "template sentinel ConfigMap monitor + resolve-hostnames"
+    fi
+
+    # Sentinel service on port 26379
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/sentinel-service.yaml 2>&1)
+    if echo "$out" | grep -q "port: 26379"; then
+        pass "template sentinel service port 26379"
+    else
+        fail "template sentinel service port 26379"
+    fi
+
+    # Sentinel headless service with clusterIP: None
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/sentinel-headless-service.yaml 2>&1)
+    if echo "$out" | grep -q "clusterIP: None"; then
+        pass "template sentinel headless service clusterIP: None"
+    else
+        fail "template sentinel headless service clusterIP: None"
+    fi
+
+    # Sentinel NOT rendered in standalone mode
+    out=$(helm template test "$CHART_DIR" --set mode=standalone 2>&1)
+    if ! echo "$out" | grep -q "sentinel-statefulset\|sentinel-configmap\|sentinel-service"; then
+        pass "template sentinel absent in standalone mode"
+    else
+        fail "template sentinel absent in standalone mode"
+    fi
+
+    # Sentinel NOT rendered in cluster mode
+    out=$(helm template test "$CHART_DIR" --set mode=cluster 2>&1)
+    if ! echo "$out" | grep -q "sentinel-statefulset\|sentinel-configmap\|sentinel-service"; then
+        pass "template sentinel absent in cluster mode"
+    else
+        fail "template sentinel absent in cluster mode"
+    fi
+
+    # Valkey StatefulSet has replicaof in command (sentinel mode)
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "replicaof"; then
+        pass "template sentinel valkey StatefulSet has replicaof"
+    else
+        fail "template sentinel valkey StatefulSet has replicaof"
+    fi
+
+    # No cluster-announce-ip in sentinel mode
+    if ! echo "$out" | grep -q "cluster-announce-ip"; then
+        pass "template sentinel no cluster-announce-ip"
+    else
+        fail "template sentinel no cluster-announce-ip"
+    fi
+
+    # No cluster_state in readiness probes (sentinel mode)
+    if ! echo "$out" | grep -q "cluster_state"; then
+        pass "template sentinel no cluster_state in probes"
+    else
+        fail "template sentinel no cluster_state in probes"
+    fi
+
+    # PDB renders in sentinel mode
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel 2>&1)
+    if echo "$out" | grep -q "PodDisruptionBudget"; then
+        pass "template PDB present in sentinel mode"
+    else
+        fail "template PDB present in sentinel mode"
+    fi
+
+    # Read service renders in sentinel mode
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Service"; then
+        pass "template read service present in sentinel mode"
+    else
+        fail "template read service present in sentinel mode"
+    fi
+
+    # HPA doesn't render in sentinel mode
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set autoscaling.hpa.enabled=true 2>&1)
+    if ! echo "$out" | grep -q "HorizontalPodAutoscaler"; then
+        pass "template HPA absent in sentinel mode"
+    else
+        fail "template HPA absent in sentinel mode"
+    fi
+
+    # Graceful failover preStop has SENTINEL FAILOVER
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "SENTINEL FAILOVER"; then
+        pass "template sentinel graceful failover preStop"
+    else
+        fail "template sentinel graceful failover preStop"
+    fi
+
+    # Custom replicas, sentinelReplicas, quorum, masterSet
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set sentinel.replicas=5 --set sentinel.sentinelReplicas=5 --set sentinel.quorum=3 --set sentinel.masterSet=mycluster 2>&1)
+    sentinel_sts=$(echo "$out" | sed -n '/kind: StatefulSet/,/^---$/p' | grep -A999 "sentinel-statefulset\|name:.*-sentinel$")
+    valkey_sts=$(helm template test "$CHART_DIR" --set mode=sentinel --set sentinel.replicas=5 --show-only templates/statefulset.yaml 2>&1)
+    if echo "$valkey_sts" | grep -q "replicas: 5"; then
+        pass "template sentinel custom data replicas"
+    else
+        fail "template sentinel custom data replicas"
+    fi
+
+    sentinel_cm=$(helm template test "$CHART_DIR" --set mode=sentinel --set sentinel.quorum=3 --set sentinel.masterSet=mycluster --show-only templates/sentinel-configmap.yaml 2>&1)
+    if echo "$sentinel_cm" | grep -q "sentinel monitor mycluster" && echo "$sentinel_cm" | grep -q " 3$"; then
+        pass "template sentinel custom masterSet + quorum"
+    else
+        fail "template sentinel custom masterSet + quorum"
+    fi
+
+    sentinel_sts_custom=$(helm template test "$CHART_DIR" --set mode=sentinel --set sentinel.sentinelReplicas=5 --show-only templates/sentinel-statefulset.yaml 2>&1)
+    if echo "$sentinel_sts_custom" | grep -q "replicas: 5"; then
+        pass "template sentinel custom sentinelReplicas"
+    else
+        fail "template sentinel custom sentinelReplicas"
+    fi
+
+    # TLS replication in configmap (sentinel mode)
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-replication yes"; then
+        pass "template sentinel TLS replication in configmap"
+    else
+        fail "template sentinel TLS replication in configmap"
+    fi
+
+    # TLS in sentinel configmap
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/sentinel-configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-port" && echo "$out" | grep -q "tls-replication yes"; then
+        pass "template sentinel TLS in sentinel configmap"
+    else
+        fail "template sentinel TLS in sentinel configmap"
+    fi
+
+    # NetworkPolicy includes sentinel port
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set networkPolicy.enabled=true --show-only templates/networkpolicy.yaml 2>&1)
+    if echo "$out" | grep -q "26379"; then
+        pass "template sentinel NetworkPolicy sentinel port"
+    else
+        fail "template sentinel NetworkPolicy sentinel port"
+    fi
+
+    # No cluster-init job in sentinel mode
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel 2>&1)
+    if ! echo "$out" | grep -q "cluster-init"; then
+        pass "template sentinel no cluster-init job"
+    else
+        fail "template sentinel no cluster-init job"
+    fi
 }
 
 # --- Deployment Tests ---
@@ -4475,6 +4654,152 @@ test_backup_cronjob() {
     kubectl delete job ${rel}-backup-manual -n $NAMESPACE 2>/dev/null || true
 }
 
+# --- Sentinel Deployment Tests ---
+
+test_sentinel_rpm() {
+    bold "=== TEST: Sentinel RPM ==="
+    local rel="sentinel-rpm"
+    local fullname="${rel}-percona-valkey"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "sentinel rpm install"; cleanup "$rel"; return; }
+    pass "sentinel rpm install"
+
+    # Verify 3 data pods running
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3; then
+        pass "sentinel 3 data pods running"
+    else
+        fail "sentinel 3 data pods running"
+    fi
+
+    # Verify 3 sentinel pods running
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3; then
+        pass "sentinel 3 sentinel pods running"
+    else
+        fail "sentinel 3 sentinel pods running"
+    fi
+
+    # Query sentinel for master
+    local master_info
+    master_info=$(kubectl exec -n $NAMESPACE ${fullname}-sentinel-0 -- valkey-cli -p 26379 -a $PASS SENTINEL get-master-addr-by-name mymaster 2>/dev/null)
+    if echo "$master_info" | grep -q "6379"; then
+        pass "sentinel reports master on port 6379"
+    else
+        fail "sentinel reports master on port 6379"
+    fi
+
+    # Ping test
+    if kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS ping 2>/dev/null | grep -q "PONG"; then
+        pass "sentinel valkey-cli ping"
+    else
+        fail "sentinel valkey-cli ping"
+    fi
+
+    # Set/get test
+    kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS set sentinel-test "hello" > /dev/null 2>&1
+    local val
+    val=$(kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS get sentinel-test 2>/dev/null)
+    if echo "$val" | grep -q "hello"; then
+        pass "sentinel set/get data"
+    else
+        fail "sentinel set/get data"
+    fi
+
+    # Verify pod-1 is replica
+    local role
+    role=$(kubectl exec -n $NAMESPACE ${fullname}-1 -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+    if echo "$role" | grep -qi "slave\|replica"; then
+        pass "sentinel pod-1 is replica"
+    else
+        fail "sentinel pod-1 is replica"
+    fi
+
+    # Sentinel service exists
+    if kubectl get svc ${fullname}-sentinel -n $NAMESPACE > /dev/null 2>&1; then
+        pass "sentinel service exists"
+    else
+        fail "sentinel service exists"
+    fi
+
+    # Helm test
+    if helm test "$rel" -n $NAMESPACE --timeout 60s > /dev/null 2>&1; then
+        pass "sentinel helm test"
+    else
+        fail "sentinel helm test"
+    fi
+
+    cleanup "$rel"
+}
+
+test_sentinel_failover() {
+    bold "=== TEST: Sentinel failover ==="
+    local rel="sentinel-fo"
+    local fullname="${rel}-percona-valkey"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        --set sentinel.downAfterMilliseconds=5000 \
+        --set sentinel.failoverTimeout=10000 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "sentinel failover install"; cleanup "$rel"; return; }
+    pass "sentinel failover install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3; then
+        pass "sentinel failover 3 data pods running"
+    else
+        fail "sentinel failover 3 data pods running"
+        cleanup "$rel"
+        return
+    fi
+
+    # Write data to master
+    kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS set failover-test "survived" > /dev/null 2>&1
+    pass "sentinel failover write data"
+
+    # Delete pod-0 (master)
+    kubectl delete pod ${fullname}-0 -n $NAMESPACE --grace-period=0 --force > /dev/null 2>&1 || true
+    pass "sentinel failover deleted pod-0"
+
+    # Wait for all 3 data pods to recover
+    sleep 10
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
+        pass "sentinel failover pods recovered"
+    else
+        fail "sentinel failover pods recovered"
+        cleanup "$rel"
+        return
+    fi
+
+    # Wait for sentinel to detect failover
+    sleep 10
+
+    # Verify data survived — try all pods since master may have changed
+    local data_found=false
+    for i in 0 1 2; do
+        local val
+        val=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS get failover-test 2>/dev/null || true)
+        if echo "$val" | grep -q "survived"; then
+            data_found=true
+            break
+        fi
+    done
+    if [ "$data_found" = "true" ]; then
+        pass "sentinel failover data survived"
+    else
+        fail "sentinel failover data survived"
+    fi
+
+    cleanup "$rel"
+}
+
 # --- Main ---
 
 main() {
@@ -4602,6 +4927,10 @@ main() {
     test_password_rotation
     echo ""
     test_backup_cronjob
+    echo ""
+    test_sentinel_rpm
+    echo ""
+    test_sentinel_failover
     echo ""
 
     # Summary

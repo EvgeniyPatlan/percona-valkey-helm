@@ -27,6 +27,10 @@ spec:
         - port: {{ .Values.cluster.busPort }}
           protocol: TCP
         {{- end }}
+        {{- if eq .Values.mode "sentinel" }}
+        - port: {{ .Values.sentinel.port }}
+          protocol: TCP
+        {{- end }}
         {{- if .Values.metrics.enabled }}
         - port: {{ .Values.metrics.port }}
           protocol: TCP

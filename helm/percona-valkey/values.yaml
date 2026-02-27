@@ -3,7 +3,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 ## @section Deployment mode
-## "standalone" or "cluster"
+## "standalone", "cluster", or "sentinel"
 mode: standalone
 
 ## @section Image configuration
@@ -116,6 +116,41 @@ cluster:
 standalone:
   replicas: 1
 
+## @section Sentinel mode settings
+## Master-replica topology monitored by Sentinel for automatic failover.
+sentinel:
+  ## Total Valkey data pods (1 master + N-1 replicas)
+  replicas: 3
+  ## Sentinel monitor pods (must be odd, minimum 3)
+  sentinelReplicas: 3
+  ## Sentinel port
+  port: 26379
+  ## Master set name (clients query Sentinel with this name)
+  masterSet: "mymaster"
+  ## Quorum: Sentinels that must agree master is down
+  quorum: 2
+  ## Milliseconds before considering master unreachable
+  downAfterMilliseconds: 30000
+  ## Failover timeout in milliseconds
+  failoverTimeout: 180000
+  ## Replicas that can sync with new master simultaneously
+  parallelSyncs: 1
+  ## Resources for Sentinel pods
+  resources: {}
+  ## Persistence for Sentinel (usually not needed)
+  persistence:
+    enabled: false
+    size: 1Gi
+  ## Scheduling for Sentinel pods
+  podAntiAffinityPreset:
+    type: ""
+    topologyKey: "kubernetes.io/hostname"
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 ## @section StatefulSet parameters
 statefulset:
   updateStrategy:
@@ -207,6 +242,7 @@ disableCommands:
 ## Per-mode overrides (optional). If set, these replace disableCommands for that mode.
 # disableCommandsStandalone: []
 # disableCommandsCluster: []
+# disableCommandsSentinel: []
 
 ## @section External Access
 ## Expose Valkey to clients outside the Kubernetes cluster.

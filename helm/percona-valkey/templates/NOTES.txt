@@ -10,6 +10,19 @@ The cluster-init job will automatically form the cluster after all pods are read
 To check cluster status:
   kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-0 -- valkey-cli {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}{{ if .Values.tls.enabled }}-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt {{ end }}cluster info
 
+{{- else if eq .Values.mode "sentinel" }}
+
+Sentinel mode: {{ .Values.sentinel.replicas }} data pods (1 master + {{ sub (int .Values.sentinel.replicas) 1 }} replicas), {{ .Values.sentinel.sentinelReplicas }} Sentinel monitors.
+Master set name: {{ .Values.sentinel.masterSet }}
+
+To query the current master:
+  kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-sentinel-0 -- valkey-cli -p {{ .Values.sentinel.port }} {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}{{ if .Values.tls.enabled }}--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key {{ end }}SENTINEL get-master-addr-by-name {{ .Values.sentinel.masterSet }}
+
+To check Sentinel status:
+  kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-sentinel-0 -- valkey-cli -p {{ .Values.sentinel.port }} {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}{{ if .Values.tls.enabled }}--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key {{ end }}INFO sentinel
+
+To connect to Valkey:
+
 {{- else }}
 
 To connect to Valkey:

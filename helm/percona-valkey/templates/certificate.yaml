@@ -27,6 +27,17 @@ spec:
     - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc
     - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local
     - "*.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+    {{- if eq .Values.mode "sentinel" }}
+    - {{ $fullname }}-sentinel
+    - {{ $fullname }}-sentinel.{{ .Release.Namespace }}
+    - {{ $fullname }}-sentinel.{{ .Release.Namespace }}.svc
+    - {{ $fullname }}-sentinel.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ $fullname }}-sentinel-headless
+    - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}
+    - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc
+    - {{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.cluster.local
+    - "*.{{ $fullname }}-sentinel-headless.{{ .Release.Namespace }}.svc.cluster.local"
+    {{- end }}
     - localhost
     {{- range .Values.tls.certManager.additionalDnsNames }}
     - {{ . | quote }}

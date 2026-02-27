@@ -1,0 +1,283 @@
+{{- if eq .Values.mode "sentinel" }}
+{{- $fullname := include "percona-valkey.fullname" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-sentinel
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sentinel
+spec:
+  replicas: {{ .Values.sentinel.sentinelReplicas }}
+  serviceName: {{ $fullname }}-sentinel-headless
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "percona-valkey.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: sentinel
+  template:
+    metadata:
+      annotations:
+        checksum/sentinel-config: {{ include (print $.Template.BasePath "/sentinel-configmap.yaml") . | sha256sum }}
+        {{- with .Values.sentinel.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "percona-valkey.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: sentinel
+        {{- with .Values.sentinel.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "percona-valkey.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- if .Values.sentinel.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.sentinel.nodeSelector | nindent 8 }}
+      {{- else }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.sentinel.affinity }}
+      affinity:
+        {{- toYaml .Values.sentinel.affinity | nindent 8 }}
+      {{- else if .Values.sentinel.podAntiAffinityPreset.type }}
+      affinity:
+        {{- $labels := include "percona-valkey.selectorLabels" . }}
+        {{- if eq .Values.sentinel.podAntiAffinityPreset.type "hard" }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- $labels | nindent 18 }}
+                  app.kubernetes.io/component: sentinel
+              topologyKey: {{ .Values.sentinel.podAntiAffinityPreset.topologyKey }}
+        {{- else if eq .Values.sentinel.podAntiAffinityPreset.type "soft" }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- $labels | nindent 20 }}
+                    app.kubernetes.io/component: sentinel
+                topologyKey: {{ .Values.sentinel.podAntiAffinityPreset.topologyKey }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.sentinel.tolerations }}
+      tolerations:
+        {{- toYaml .Values.sentinel.tolerations | nindent 8 }}
+      {{- else }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      initContainers:
+        - name: sentinel-init
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/sentinel-config/sentinel.conf /data/sentinel.conf
+              {{- if .Values.auth.enabled }}
+              {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
+              PASS=$(cat {{ .Values.auth.passwordFilePath }}/valkey-password)
+              {{- else }}
+              PASS="$VALKEY_PASSWORD"
+              {{- end }}
+              echo "" >> /data/sentinel.conf
+              echo "sentinel auth-pass {{ .Values.sentinel.masterSet }} $PASS" >> /data/sentinel.conf
+              echo "requirepass $PASS" >> /data/sentinel.conf
+              {{- end }}
+          {{- if .Values.auth.enabled }}
+          env:
+            {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
+            - name: VALKEY_PASSWORD_FILE
+              value: {{ .Values.auth.passwordFilePath }}/valkey-password
+            {{- else }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: sentinel-data
+              mountPath: /data
+            - name: sentinel-config
+              mountPath: /etc/sentinel-config
+              readOnly: true
+            {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
+            - name: valkey-password
+              mountPath: {{ .Values.auth.passwordFilePath }}
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: sentinel
+          image: {{ include "percona-valkey.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- if eq .Values.image.variant "hardened" }}
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            {{- else }}
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: sentinel
+              containerPort: {{ .Values.sentinel.port }}
+              protocol: TCP
+          command:
+            - valkey-sentinel
+            - /data/sentinel.conf
+          {{- if .Values.auth.enabled }}
+          env:
+            {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
+            - name: VALKEY_PASSWORD_FILE
+              value: {{ .Values.auth.passwordFilePath }}/valkey-password
+            {{- else }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "percona-valkey.secretName" . }}
+                  key: valkey-password
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+                  {{- if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  {{- end }}
+                  {{- else if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} ping )
+                  {{- end }}
+                  [ "$response" = "PONG" ]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+            successThreshold: 1
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+                  {{- if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  {{- end }}
+                  {{- else if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} ping )
+                  {{- end }}
+                  [ "$response" = "PONG" ]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          {{- with .Values.sentinel.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: sentinel-data
+              mountPath: /data
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
+            - name: valkey-password
+              mountPath: {{ .Values.auth.passwordFilePath }}
+              readOnly: true
+            {{- end }}
+            {{- if eq .Values.image.variant "hardened" }}
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run/valkey
+            {{- end }}
+      volumes:
+        - name: sentinel-config
+          configMap:
+            name: {{ $fullname }}-sentinel
+        {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
+        - name: valkey-password
+          secret:
+            secretName: {{ include "percona-valkey.secretName" . }}
+            items:
+              - key: valkey-password
+                path: valkey-password
+        {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "percona-valkey.tlsSecretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- if eq .Values.image.variant "hardened" }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+        - name: run
+          emptyDir:
+            medium: Memory
+        {{- end }}
+        {{- if not .Values.sentinel.persistence.enabled }}
+        - name: sentinel-data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.sentinel.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: sentinel-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.sentinel.persistence.size }}
+  {{- end }}
+{{- end }}

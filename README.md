@@ -1,6 +1,6 @@
 # Percona Valkey Helm Chart
 
-A production-ready Helm chart for deploying Percona Valkey on Kubernetes. Supports both **standalone** and **native Valkey Cluster** modes with two image variants: RPM-based (UBI9) and Hardened (DHI).
+A production-ready Helm chart for deploying Percona Valkey on Kubernetes. Supports **standalone**, **native Valkey Cluster**, and **Sentinel** modes with two image variants: RPM-based (UBI9) and Hardened (DHI).
 
 ## Chart Structure
 
@@ -128,7 +128,7 @@ When the hardened variant is selected, the chart automatically:
 |-----------|-------------|---------|
 | `nameOverride` | Override chart name | `""` |
 | `fullnameOverride` | Override full release name | `""` |
-| `mode` | Deployment mode: `standalone` or `cluster` | `standalone` |
+| `mode` | Deployment mode: `standalone`, `cluster`, or `sentinel` | `standalone` |
 
 #### Image
 
@@ -590,9 +590,7 @@ Pod annotations include `checksum/config` computed from the ConfigMap content. W
 
 2. **Jobs default to RPM image**: The cluster-init Job, cluster-scale Job, backup CronJob, and helm test pod use the RPM image variant by default because they need shell utilities (`sh`, `grep`, `valkey-cli`). Use `image.jobs.repository` and `image.jobs.tag` to override with a custom image in air-gapped environments.
 
-3. **No built-in Sentinel support**: This chart supports standalone and native Valkey Cluster modes only. Sentinel-based HA is not included.
-
-4. **Auto-generated passwords and `helm template`**: Auto-generated passwords are preserved across `helm upgrade` (the chart looks up the existing Secret). However, `helm template` always generates a new random password since it cannot access the cluster. Use `auth.password` or `auth.existingSecret` if you need deterministic output.
+3. **Auto-generated passwords and `helm template`**: Auto-generated passwords are preserved across `helm upgrade` (the chart looks up the existing Secret). However, `helm template` always generates a new random password since it cannot access the cluster. Use `auth.password` or `auth.existingSecret` if you need deterministic output.
 
 ## Troubleshooting
 
