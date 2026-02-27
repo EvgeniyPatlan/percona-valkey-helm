@@ -2695,14 +2695,16 @@ test_template_render() {
     # --- Schema validation tests ---
 
     # Invalid mode value rejected
-    if helm template test "$CHART_DIR" --set mode=invalid 2>&1 | grep -qi "fail\|error\|invalid\|enum"; then
+    out=$(helm template test "$CHART_DIR" --set mode=invalid 2>&1 || true)
+    if echo "$out" | grep -qi "fail\|error\|invalid\|enum"; then
         pass "template schema rejects invalid mode"
     else
         fail "template schema rejects invalid mode"
     fi
 
     # Invalid image variant rejected
-    if helm template test "$CHART_DIR" --set image.variant=invalid 2>&1 | grep -qi "fail\|error\|invalid\|enum"; then
+    out=$(helm template test "$CHART_DIR" --set image.variant=invalid 2>&1 || true)
+    if echo "$out" | grep -qi "fail\|error\|invalid\|enum"; then
         pass "template schema rejects invalid image.variant"
     else
         fail "template schema rejects invalid image.variant"
@@ -2716,7 +2718,8 @@ test_template_render() {
     fi
 
     # Invalid type rejected (string where object expected)
-    if helm template test "$CHART_DIR" --set auth=notanobject 2>&1 | grep -qi "fail\|error\|invalid\|expected"; then
+    out=$(helm template test "$CHART_DIR" --set auth=notanobject 2>&1 || true)
+    if echo "$out" | grep -qi "fail\|error\|invalid\|expected"; then
         pass "template schema rejects invalid type"
     else
         fail "template schema rejects invalid type"
