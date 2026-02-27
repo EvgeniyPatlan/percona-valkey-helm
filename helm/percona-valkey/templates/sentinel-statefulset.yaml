@@ -175,8 +175,9 @@ spec:
               containerPort: {{ .Values.sentinel.port }}
               protocol: TCP
           command:
-            - valkey-sentinel
+            - valkey-server
             - /data/sentinel.conf
+            - --sentinel
           {{- if .Values.auth.enabled }}
           env:
             {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}

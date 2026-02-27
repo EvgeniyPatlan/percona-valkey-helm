@@ -4684,6 +4684,9 @@ test_sentinel_rpm() {
         fail "sentinel 3 sentinel pods running"
     fi
 
+    # Wait for sentinel topology to stabilize and replication to establish
+    sleep 10
+
     # Query sentinel for master
     local master_info
     master_info=$(kubectl exec -n $NAMESPACE ${fullname}-sentinel-0 -- valkey-cli -p 26379 -a $PASS SENTINEL get-master-addr-by-name mymaster 2>/dev/null)
@@ -4712,6 +4715,23 @@ test_sentinel_rpm() {
         replica_pod="${fullname}-1"
     fi
 
+    # Wait for replicas to connect to master
+    local repl_ok=false
+    for attempt in $(seq 1 15); do
+        local connected
+        connected=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS info replication 2>/dev/null | grep "connected_slaves:" | tr -d '\r' | cut -d: -f2)
+        if [ "${connected:-0}" -ge 2 ]; then
+            repl_ok=true
+            break
+        fi
+        sleep 2
+    done
+    if [ "$repl_ok" = "true" ]; then
+        pass "sentinel 2 replicas connected"
+    else
+        fail "sentinel 2 replicas connected (got: ${connected:-0})"
+    fi
+
     # Ping test
     if kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS ping 2>/dev/null | grep -q "PONG"; then
         pass "sentinel valkey-cli ping"
@@ -4720,13 +4740,18 @@ test_sentinel_rpm() {
     fi
 
     # Set/get test (write to actual master)
-    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set sentinel-test "hello" > /dev/null 2>&1
-    local val
-    val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS get sentinel-test 2>/dev/null)
-    if echo "$val" | grep -q "hello"; then
-        pass "sentinel set/get data"
+    local set_result
+    set_result=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set sentinel-test "hello" 2>/dev/null)
+    if echo "$set_result" | grep -q "OK"; then
+        local val
+        val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS get sentinel-test 2>/dev/null)
+        if echo "$val" | grep -q "hello"; then
+            pass "sentinel set/get data"
+        else
+            fail "sentinel set/get data (set OK but get returned: $val)"
+        fi
     else
-        fail "sentinel set/get data"
+        fail "sentinel set/get data (set on $master_pod returned: $set_result)"
     fi
 
     # Verify at least one replica exists
@@ -4787,7 +4812,10 @@ test_sentinel_failover() {
         return
     fi
 
-    # Find the actual master pod
+    # Wait for sentinel topology to stabilize
+    sleep 10
+
+    # Find the actual master pod and wait for replicas to connect
     local master_pod=""
     for i in 0 1 2; do
         local r
@@ -4801,9 +4829,27 @@ test_sentinel_failover() {
         master_pod="${fullname}-0"
     fi
 
-    # Write data to master
-    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set failover-test "survived" > /dev/null 2>&1
-    pass "sentinel failover write data to $master_pod"
+    # Wait for replication to be fully established
+    for attempt in $(seq 1 15); do
+        local connected
+        connected=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS info replication 2>/dev/null | grep "connected_slaves:" | tr -d '\r' | cut -d: -f2)
+        [ "${connected:-0}" -ge 2 ] && break
+        sleep 2
+    done
+
+    # Write data to master and verify SET succeeded
+    local set_result
+    set_result=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set failover-test "survived" 2>/dev/null)
+    if echo "$set_result" | grep -q "OK"; then
+        pass "sentinel failover write data to $master_pod"
+    else
+        fail "sentinel failover write data to $master_pod (set returned: $set_result)"
+        cleanup "$rel"
+        return
+    fi
+
+    # Wait for the write to replicate
+    sleep 3
 
     # Delete the master pod
     kubectl delete pod $master_pod -n $NAMESPACE --grace-period=0 --force > /dev/null 2>&1 || true
