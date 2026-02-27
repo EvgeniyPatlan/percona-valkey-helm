@@ -235,7 +235,11 @@ spec:
               ANNOUNCE_BUS_PORT=$(cat /external-config/external-bus-port)
               EXTRA_ARGS="--cluster-announce-ip $ANNOUNCE_IP --cluster-announce-port $ANNOUNCE_PORT --cluster-announce-bus-port $ANNOUNCE_BUS_PORT"
               {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
+              {{- if .Values.acl.enabled }}
+              EXTRA_ARGS="$EXTRA_ARGS --masterauth $VALKEY_PASSWORD"
+              {{- else }}
               EXTRA_ARGS="$EXTRA_ARGS --requirepass $VALKEY_PASSWORD --masterauth $VALKEY_PASSWORD"
+              {{- end }}
               {{- end }}
               {{- if .Values.config.extraFlags }}
               EXTRA_ARGS="$EXTRA_ARGS {{ .Values.config.extraFlags }}"
@@ -416,6 +420,11 @@ spec:
               mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.acl.enabled }}
+            - name: acl-config
+              mountPath: /etc/valkey/acl
+              readOnly: true
+            {{- end }}
             {{- if include "percona-valkey.externalAccessCluster" . }}
             - name: external-config
               mountPath: /external-config
@@ -500,6 +509,14 @@ spec:
                 path: tls.key
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if .Values.acl.enabled }}
+        - name: acl-config
+          secret:
+            secretName: {{ include "percona-valkey.aclSecretName" . }}
+            items:
+              - key: users.acl
+                path: users.acl
         {{- end }}
         {{- if include "percona-valkey.externalAccessCluster" . }}
         - name: external-config

@@ -110,6 +110,18 @@ test_lint() {
     else
         fail "lint cluster/hardened"
     fi
+
+    if helm lint "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
+        pass "lint standalone/acl"
+    else
+        fail "lint standalone/acl"
+    fi
+
+    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
+        pass "lint cluster/acl"
+    else
+        fail "lint cluster/acl"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2017,6 +2029,87 @@ test_template_render() {
     else
         fail "template no dnsPolicy/dnsConfig by default"
     fi
+
+    # --- ACL tests ---
+
+    # ACL disabled by default (no aclfile in configmap)
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "aclfile"; then
+        pass "template ACL disabled by default (no aclfile)"
+    else
+        fail "template ACL disabled by default (no aclfile)"
+    fi
+
+    # ACL enabled: aclfile present in configmap
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "aclfile /etc/valkey/acl/users.acl"; then
+        pass "template ACL enabled: aclfile in configmap"
+    else
+        fail "template ACL enabled: aclfile in configmap"
+    fi
+
+    # ACL enabled with inline users: users.acl key in Secret
+    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS --set acl.enabled=true --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "users.acl:"; then
+        pass "template ACL enabled: users.acl key in Secret"
+    else
+        fail "template ACL enabled: users.acl key in Secret"
+    fi
+
+    # ACL enabled: volume mount present in statefulset
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: acl-config" && echo "$out" | grep -q "mountPath: /etc/valkey/acl"; then
+        pass "template ACL enabled: volume mount in statefulset"
+    else
+        fail "template ACL enabled: volume mount in statefulset"
+    fi
+
+    # ACL enabled: acl-config volume present in statefulset
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS --set acl.enabled=true --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: acl-config"; then
+        pass "template ACL enabled: acl-config volume in statefulset"
+    else
+        fail "template ACL enabled: acl-config volume in statefulset"
+    fi
+
+    # ACL with existingSecret: uses external secret name
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set acl.existingSecret=my-acl-secret --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "my-acl-secret"; then
+        pass "template ACL existingSecret: uses external secret name"
+    else
+        fail "template ACL existingSecret: uses external secret name"
+    fi
+
+    # ACL with existingSecret: no users.acl key in chart Secret
+    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS --set acl.enabled=true --set acl.existingSecret=my-acl-secret --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/secret.yaml 2>&1)
+    if ! echo "$out" | grep -q "users.acl:"; then
+        pass "template ACL existingSecret: no users.acl in chart Secret"
+    else
+        fail "template ACL existingSecret: no users.acl in chart Secret"
+    fi
+
+    # ACL disabled: no volume mount in statefulset
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "acl-config"; then
+        pass "template ACL disabled: no acl-config in statefulset"
+    else
+        fail "template ACL disabled: no acl-config in statefulset"
+    fi
+
+    # ACL + cluster mode: lint passes
+    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
+        pass "template ACL + cluster mode lint"
+    else
+        fail "template ACL + cluster mode lint"
+    fi
+
+    # ACL + external access: --masterauth without --requirepass
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --set acl.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "\-\-masterauth" && ! echo "$out" | grep -q "\-\-requirepass"; then
+        pass "template ACL + external access: masterauth without requirepass"
+    else
+        fail "template ACL + external access: masterauth without requirepass"
+    fi
 }
 
 # --- Deployment Tests ---
@@ -3907,6 +4000,50 @@ test_runtime_class() {
     fi
 }
 
+test_acl_standalone() {
+    bold "=== TEST: ACL standalone ==="
+    local rel="t-acl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set acl.enabled=true \
+        --set 'acl.users=user app on >apppass123 ~* &* +@all' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "acl standalone install"; cleanup "$rel"; return; }
+    pass "acl standalone install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "acl standalone pod ready"
+    else
+        fail "acl standalone pod ready"; cleanup "$rel"; return
+    fi
+
+    # Verify default user can ping (uses auth.password)
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "acl default user ping"
+    else
+        fail "acl default user ping"
+    fi
+
+    # Verify custom ACL user can authenticate
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli --user app --pass apppass123 ping 2>/dev/null | grep -q PONG; then
+        pass "acl custom user (app) ping"
+    else
+        fail "acl custom user (app) ping"
+    fi
+
+    # Verify ACL list shows the custom user
+    local acl_list
+    acl_list=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS acl list 2>/dev/null)
+    if echo "$acl_list" | grep -q "user app"; then
+        pass "acl list contains custom user"
+    else
+        fail "acl list contains custom user"
+    fi
+
+    cleanup "$rel"
+}
+
 # --- Main ---
 
 main() {
@@ -4026,6 +4163,8 @@ main() {
     test_dns_config
     echo ""
     test_runtime_class
+    echo ""
+    test_acl_standalone
     echo ""
 
     # Summary

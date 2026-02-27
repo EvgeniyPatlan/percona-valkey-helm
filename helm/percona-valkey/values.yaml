@@ -28,6 +28,22 @@ auth:
   ## Directory where password file is mounted
   passwordFilePath: /opt/valkey/secrets
 
+## @section ACL (Access Control List)
+## Multi-user authentication with per-user command and key restrictions.
+## Requires auth.enabled=true. The default user password is still managed by auth.password.
+acl:
+  enabled: false
+  ## Existing Secret containing a "users.acl" key with ACL rules.
+  ## When set, acl.users is ignored.
+  existingSecret: ""
+  ## Inline ACL rules. Rendered into a Secret and mounted as users.acl.
+  ## The default user line is auto-generated from auth.password if not included here.
+  ## Example:
+  ##   users: |
+  ##     user app on >apppass ~cache:* +@read +@write -@dangerous
+  ##     user monitor on >monpass +client +info +slowlog +latency +ping
+  users: ""
+
 ## @section TLS/SSL configuration
 tls:
   enabled: false

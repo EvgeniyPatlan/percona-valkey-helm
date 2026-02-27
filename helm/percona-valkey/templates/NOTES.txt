@@ -87,6 +87,20 @@ To list external NodePorts:
 To run the connection test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
 
+{{- if .Values.acl.enabled }}
+
+ACL (Access Control List) is enabled.
+The default user authenticates with the password from auth.password / auth.existingSecret.
+{{- if .Values.acl.existingSecret }}
+ACL rules are loaded from existing Secret: {{ .Values.acl.existingSecret }} (key: users.acl)
+{{- else if .Values.acl.users }}
+ACL rules are rendered from acl.users into the chart Secret (key: users.acl)
+{{- end }}
+
+To connect as a custom ACL user:
+  valkey-cli -h <host> -p {{ .Values.service.port }} --user <username> --pass <password>
+{{- end }}
+
 {{- if .Values.tls.enabled }}
 
 TLS is enabled on port {{ .Values.tls.port }}.

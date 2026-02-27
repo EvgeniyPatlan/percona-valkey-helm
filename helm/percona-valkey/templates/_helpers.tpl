@@ -95,6 +95,17 @@ Secret name (existing or generated).
 {{- end }}
 
 {{/*
+ACL secret name (existing or chart-managed).
+*/}}
+{{- define "percona-valkey.aclSecretName" -}}
+{{- if .Values.acl.existingSecret }}
+{{- .Values.acl.existingSecret }}
+{{- else }}
+{{- include "percona-valkey.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
 TLS secret name (existing or generated from cert-manager).
 */}}
 {{- define "percona-valkey.tlsSecretName" -}}

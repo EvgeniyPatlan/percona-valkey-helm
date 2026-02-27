@@ -60,6 +60,10 @@ data:
     {{- else if and (eq .Values.mode "cluster") .Values.disableCommandsCluster }}
     {{- $cmds = .Values.disableCommandsCluster }}
     {{- end }}
+    {{- if .Values.acl.enabled }}
+    # ACL configuration
+    aclfile /etc/valkey/acl/users.acl
+    {{- end }}
     {{- if $cmds }}
     # Disabled commands
     {{- range $cmds }}
