@@ -250,7 +250,7 @@ spec:
             - sh
             - -c
             - |
-              HOSTNAME=$(hostname)
+              HOSTNAME=$(cat /etc/hostname)
               ORDINAL=${HOSTNAME##*-}
               EXTRA_ARGS=""
               {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
