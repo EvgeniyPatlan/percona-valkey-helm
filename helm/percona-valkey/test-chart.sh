@@ -4693,30 +4693,49 @@ test_sentinel_rpm() {
         fail "sentinel reports master on port 6379"
     fi
 
+    # Find the actual master pod via role check
+    local master_pod=""
+    local replica_pod=""
+    for i in 0 1 2; do
+        local r
+        r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+        elif [ -z "$replica_pod" ]; then
+            replica_pod="${fullname}-$i"
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+    if [ -z "$replica_pod" ]; then
+        replica_pod="${fullname}-1"
+    fi
+
     # Ping test
-    if kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS ping 2>/dev/null | grep -q "PONG"; then
+    if kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS ping 2>/dev/null | grep -q "PONG"; then
         pass "sentinel valkey-cli ping"
     else
         fail "sentinel valkey-cli ping"
     fi
 
-    # Set/get test
-    kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS set sentinel-test "hello" > /dev/null 2>&1
+    # Set/get test (write to actual master)
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set sentinel-test "hello" > /dev/null 2>&1
     local val
-    val=$(kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS get sentinel-test 2>/dev/null)
+    val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS get sentinel-test 2>/dev/null)
     if echo "$val" | grep -q "hello"; then
         pass "sentinel set/get data"
     else
         fail "sentinel set/get data"
     fi
 
-    # Verify pod-1 is replica
+    # Verify at least one replica exists
     local role
-    role=$(kubectl exec -n $NAMESPACE ${fullname}-1 -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+    role=$(kubectl exec -n $NAMESPACE $replica_pod -- valkey-cli -a $PASS role 2>/dev/null | head -1)
     if echo "$role" | grep -qi "slave\|replica"; then
-        pass "sentinel pod-1 is replica"
+        pass "sentinel replica found"
     else
-        fail "sentinel pod-1 is replica"
+        fail "sentinel replica found"
     fi
 
     # Sentinel service exists
@@ -4752,6 +4771,14 @@ test_sentinel_failover() {
         -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "sentinel failover install"; cleanup "$rel"; return; }
     pass "sentinel failover install"
 
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3; then
+        pass "sentinel failover 3 sentinel pods running"
+    else
+        fail "sentinel failover 3 sentinel pods running"
+        cleanup "$rel"
+        return
+    fi
+
     if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3; then
         pass "sentinel failover 3 data pods running"
     else
@@ -4760,16 +4787,30 @@ test_sentinel_failover() {
         return
     fi
 
-    # Write data to master
-    kubectl exec -n $NAMESPACE ${fullname}-0 -- valkey-cli -a $PASS set failover-test "survived" > /dev/null 2>&1
-    pass "sentinel failover write data"
+    # Find the actual master pod
+    local master_pod=""
+    for i in 0 1 2; do
+        local r
+        r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
 
-    # Delete pod-0 (master)
-    kubectl delete pod ${fullname}-0 -n $NAMESPACE --grace-period=0 --force > /dev/null 2>&1 || true
-    pass "sentinel failover deleted pod-0"
+    # Write data to master
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set failover-test "survived" > /dev/null 2>&1
+    pass "sentinel failover write data to $master_pod"
+
+    # Delete the master pod
+    kubectl delete pod $master_pod -n $NAMESPACE --grace-period=0 --force > /dev/null 2>&1 || true
+    pass "sentinel failover deleted $master_pod"
 
     # Wait for all 3 data pods to recover
-    sleep 10
+    sleep 15
     if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
         pass "sentinel failover pods recovered"
     else
@@ -4778,10 +4819,10 @@ test_sentinel_failover() {
         return
     fi
 
-    # Wait for sentinel to detect failover
-    sleep 10
+    # Wait for sentinel to complete failover
+    sleep 15
 
-    # Verify data survived — try all pods since master may have changed
+    # Verify data survived — try all pods since master changed
     local data_found=false
     for i in 0 1 2; do
         local val

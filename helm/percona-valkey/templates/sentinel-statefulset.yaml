@@ -86,6 +86,32 @@ spec:
       {{- end }}
       {{- end }}
       initContainers:
+        - name: wait-for-master
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Valkey master to accept connections..."
+              {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+              until valkey-cli -h {{ $fullname }}-0.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local -p {{ .Values.tls.port }} {{ include "percona-valkey.tlsCliFlags" . }} ping 2>/dev/null | grep -qE "PONG|NOAUTH"; do
+                sleep 2
+              done
+              {{- else }}
+              until valkey-cli -h {{ $fullname }}-0.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local -p {{ .Values.service.port }} ping 2>/dev/null | grep -qE "PONG|NOAUTH"; do
+                sleep 2
+              done
+              {{- end }}
+              echo "Master is ready."
+          {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+          {{- end }}
         - name: sentinel-init
           image: {{ include "percona-valkey.rpmImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
