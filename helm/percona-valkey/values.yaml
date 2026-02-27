@@ -199,7 +199,14 @@ metrics:
     #       summary: "Valkey instance {{ $labels.instance }} is down"
     rules: []
 
+## @section Graceful failover (cluster mode only)
+## Adds a preStop hook that triggers CLUSTER FAILOVER on primary nodes
+## before pod shutdown, ensuring zero-downtime rolling updates.
+gracefulFailover:
+  enabled: true
+
 ## @section Lifecycle hooks
+## Custom lifecycle hooks. These OVERRIDE the built-in graceful failover preStop.
 lifecycle: {}
   # postStart:
   #   exec:

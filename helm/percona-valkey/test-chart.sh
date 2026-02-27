@@ -1279,6 +1279,57 @@ test_template_render() {
         fail "template NOTES.txt file exists"
     fi
 
+    # --- Graceful failover ---
+
+    # Graceful failover preStop present in cluster mode
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "lifecycle:" && echo "$out" | grep -q "preStop:" && echo "$out" | grep -q "cluster failover"; then
+        pass "template graceful failover preStop in cluster mode"
+    else
+        fail "template graceful failover preStop in cluster mode"
+    fi
+
+    # Graceful failover absent in standalone mode
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "lifecycle:"; then
+        pass "template no lifecycle hook in standalone mode"
+    else
+        fail "template no lifecycle hook in standalone mode"
+    fi
+
+    # Graceful failover disabled
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set gracefulFailover.enabled=false --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "lifecycle:"; then
+        pass "template graceful failover disabled"
+    else
+        fail "template graceful failover disabled"
+    fi
+
+    # User lifecycle overrides graceful failover
+    out=$(helm template test "$CHART_DIR" --set mode=cluster \
+        --set 'lifecycle.preStop.exec.command[0]=custom-shutdown' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "custom-shutdown" && ! echo "$out" | grep -q "cluster failover"; then
+        pass "template user lifecycle overrides graceful failover"
+    else
+        fail "template user lifecycle overrides graceful failover"
+    fi
+
+    # Graceful failover uses valkey-cli role (no grep/awk for hardened compat)
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-cli.*role" && ! echo "$out" | grep -q "grep\|awk"; then
+        pass "template graceful failover uses shell builtins only (hardened compatible)"
+    else
+        fail "template graceful failover uses shell builtins only"
+    fi
+
+    # Graceful failover without auth
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set auth.enabled=false --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'AUTH=""'; then
+        pass "template graceful failover no-auth mode"
+    else
+        fail "template graceful failover no-auth mode"
+    fi
+
     # --- Cluster replicasPerPrimary ---
 
     # replicasPerPrimary used in cluster-init-job
@@ -1762,6 +1813,93 @@ test_cluster_hardened() {
         pass "cluster hardened helm test"
     else
         fail "cluster hardened helm test"
+    fi
+
+    cleanup "$rel"
+}
+
+test_graceful_failover() {
+    bold "=== TEST: Graceful failover on pod termination ==="
+    local rel="t-failover"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "graceful-failover install"; cleanup "$rel"; return; }
+    pass "graceful-failover install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "graceful-failover 6 pods ready"
+    else
+        fail "graceful-failover 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if [ "$state" != "cluster_state:ok" ]; then
+        fail "graceful-failover cluster_state:ok (got: $state)"; cleanup "$rel"; return
+    fi
+    pass "graceful-failover cluster_state:ok"
+
+    # Verify preStop hook is set on the pod
+    local prestop=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.containers[0].lifecycle.preStop.exec.command}' 2>/dev/null)
+    if echo "$prestop" | grep -q "failover"; then
+        pass "graceful-failover preStop hook present"
+    else
+        fail "graceful-failover preStop hook present (got: $prestop)"
+    fi
+
+    # Find a primary node
+    local primary_pod=""
+    for i in $(seq 0 5); do
+        local role=$(kubectl exec ${rel}-percona-valkey-$i -n $NAMESPACE -- valkey-cli -a $PASS role 2>/dev/null | head -1 | tr -d '\r')
+        if [ "$role" = "master" ]; then
+            primary_pod="${rel}-percona-valkey-$i"
+            break
+        fi
+    done
+
+    if [ -z "$primary_pod" ]; then
+        fail "graceful-failover could not find primary"; cleanup "$rel"; return
+    fi
+    pass "graceful-failover found primary: $primary_pod"
+
+    # Write data before failover
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set failover-key "must-survive" > /dev/null 2>&1
+
+    # Delete the primary pod (triggers preStop -> CLUSTER FAILOVER)
+    kubectl delete pod "$primary_pod" -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for pod to come back
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "graceful-failover all 6 pods recovered"
+    else
+        fail "graceful-failover pods recovered"; cleanup "$rel"; return
+    fi
+
+    # Cluster should still be healthy
+    sleep 5
+    local state2=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if [ "$state2" = "cluster_state:ok" ]; then
+        pass "graceful-failover cluster_state:ok after failover"
+    else
+        fail "graceful-failover cluster_state:ok after failover (got: $state2)"
+    fi
+
+    # All 16384 slots still assigned
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r')
+    if [ "$slots" = "cluster_slots_ok:16384" ]; then
+        pass "graceful-failover all 16384 slots intact"
+    else
+        fail "graceful-failover slots (got: $slots)"
+    fi
+
+    # Data survived
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get failover-key 2>/dev/null)
+    if [ "$val" = "must-survive" ]; then
+        pass "graceful-failover data survived"
+    else
+        fail "graceful-failover data survived (got: $val)"
     fi
 
     cleanup "$rel"
@@ -2769,6 +2907,8 @@ main() {
     test_cluster_multi_slot
     echo ""
     test_cluster_custom_node_timeout
+    echo ""
+    test_graceful_failover
     echo ""
     test_cluster_scale_up
     echo ""

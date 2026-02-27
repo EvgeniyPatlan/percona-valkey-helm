@@ -165,9 +165,36 @@ spec:
             {{- with .Values.extraEnvVars }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with .Values.lifecycle }}
+          {{- if .Values.lifecycle }}
           lifecycle:
-            {{- toYaml . | nindent 12 }}
+            {{- toYaml .Values.lifecycle | nindent 12 }}
+          {{- else if and (eq .Values.mode "cluster") .Values.gracefulFailover.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    {{- if .Values.auth.enabled }}
+                    AUTH="-a $VALKEY_PASSWORD"
+                    {{- else }}
+                    AUTH=""
+                    {{- end }}
+                    ROLE=$(valkey-cli $AUTH role)
+                    case "$ROLE" in
+                      master*)
+                        valkey-cli $AUTH cluster failover
+                        i=0
+                        while [ $i -lt 20 ]; do
+                          NEWROLE=$(valkey-cli $AUTH role)
+                          case "$NEWROLE" in slave*|replica*) break;; esac
+                          sleep 0.5
+                          i=$((i+1))
+                        done
+                        ;;
+                    esac
+                    valkey-cli $AUTH shutdown nosave || true
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
