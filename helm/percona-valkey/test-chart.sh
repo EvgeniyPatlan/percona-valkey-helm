@@ -1800,6 +1800,187 @@ test_template_render() {
     else
         fail "template no RBAC when externalAccess disabled"
     fi
+
+    # --- Pod anti-affinity preset tests ---
+
+    # Soft anti-affinity preset
+    out=$(helm template test "$CHART_DIR" --set podAntiAffinityPreset.type=soft --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "preferredDuringSchedulingIgnoredDuringExecution"; then
+        pass "template soft anti-affinity preset"
+    else
+        fail "template soft anti-affinity preset"
+    fi
+
+    # Hard anti-affinity preset
+    out=$(helm template test "$CHART_DIR" --set podAntiAffinityPreset.type=hard --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "requiredDuringSchedulingIgnoredDuringExecution"; then
+        pass "template hard anti-affinity preset"
+    else
+        fail "template hard anti-affinity preset"
+    fi
+
+    # Anti-affinity preset ignored when affinity is set explicitly
+    out=$(helm template test "$CHART_DIR" --set podAntiAffinityPreset.type=hard --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=zone' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "nodeAffinity" && ! echo "$out" | grep -q "podAntiAffinity"; then
+        pass "template anti-affinity preset ignored with explicit affinity"
+    else
+        fail "template anti-affinity preset ignored with explicit affinity"
+    fi
+
+    # Custom topologyKey for anti-affinity
+    out=$(helm template test "$CHART_DIR" --set podAntiAffinityPreset.type=soft --set podAntiAffinityPreset.topologyKey=topology.kubernetes.io/zone --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "topology.kubernetes.io/zone"; then
+        pass "template anti-affinity custom topologyKey"
+    else
+        fail "template anti-affinity custom topologyKey"
+    fi
+
+    # No anti-affinity when preset type is empty (default)
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "podAntiAffinity"; then
+        pass "template no anti-affinity by default"
+    else
+        fail "template no anti-affinity by default"
+    fi
+
+    # --- Topology spread constraints ---
+    out=$(helm template test "$CHART_DIR" \
+        --set 'topologySpreadConstraints[0].maxSkew=1' \
+        --set 'topologySpreadConstraints[0].topologyKey=kubernetes.io/hostname' \
+        --set 'topologySpreadConstraints[0].whenUnsatisfiable=DoNotSchedule' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "topologySpreadConstraints" && echo "$out" | grep -q "maxSkew"; then
+        pass "template topologySpreadConstraints"
+    else
+        fail "template topologySpreadConstraints"
+    fi
+
+    # No topologySpreadConstraints by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "topologySpreadConstraints"; then
+        pass "template no topologySpreadConstraints by default"
+    else
+        fail "template no topologySpreadConstraints by default"
+    fi
+
+    # --- Priority class ---
+    out=$(helm template test "$CHART_DIR" --set priorityClassName=high-priority --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "priorityClassName: high-priority"; then
+        pass "template priorityClassName"
+    else
+        fail "template priorityClassName"
+    fi
+
+    # No priorityClassName by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "priorityClassName"; then
+        pass "template no priorityClassName by default"
+    else
+        fail "template no priorityClassName by default"
+    fi
+
+    # --- Termination grace period ---
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "terminationGracePeriodSeconds: 30"; then
+        pass "template terminationGracePeriodSeconds default 30"
+    else
+        fail "template terminationGracePeriodSeconds default 30"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set terminationGracePeriodSeconds=120 --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "terminationGracePeriodSeconds: 120"; then
+        pass "template terminationGracePeriodSeconds custom"
+    else
+        fail "template terminationGracePeriodSeconds custom"
+    fi
+
+    # --- Extra init containers ---
+    out=$(helm template test "$CHART_DIR" \
+        --set 'extraInitContainers[0].name=my-init' \
+        --set 'extraInitContainers[0].image=busybox' \
+        --set 'extraInitContainers[0].command[0]=echo' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: my-init" && echo "$out" | grep -q "image: busybox"; then
+        pass "template extraInitContainers"
+    else
+        fail "template extraInitContainers"
+    fi
+
+    # --- Extra sidecar containers ---
+    out=$(helm template test "$CHART_DIR" \
+        --set 'extraContainers[0].name=my-sidecar' \
+        --set 'extraContainers[0].image=busybox' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: my-sidecar" && echo "$out" | grep -q "image: busybox"; then
+        pass "template extraContainers"
+    else
+        fail "template extraContainers"
+    fi
+
+    # --- HPA tests ---
+
+    # HPA disabled by default
+    if ! helm template test "$CHART_DIR" --show-only templates/hpa.yaml 2>&1 | grep -q "kind:"; then
+        pass "template HPA disabled by default"
+    else
+        fail "template HPA disabled by default"
+    fi
+
+    # HPA enabled in standalone mode
+    out=$(helm template test "$CHART_DIR" --set autoscaling.hpa.enabled=true --show-only templates/hpa.yaml 2>&1)
+    if echo "$out" | grep -q "HorizontalPodAutoscaler" && echo "$out" | grep -q "maxReplicas"; then
+        pass "template HPA enabled standalone"
+    else
+        fail "template HPA enabled standalone"
+    fi
+
+    # HPA not rendered in cluster mode
+    if ! helm template test "$CHART_DIR" --set mode=cluster --set autoscaling.hpa.enabled=true --show-only templates/hpa.yaml 2>&1 | grep -q "kind:"; then
+        pass "template HPA not rendered in cluster mode"
+    else
+        fail "template HPA not rendered in cluster mode"
+    fi
+
+    # --- VPA tests ---
+
+    # VPA disabled by default
+    if ! helm template test "$CHART_DIR" --show-only templates/vpa.yaml 2>&1 | grep -q "kind:"; then
+        pass "template VPA disabled by default"
+    else
+        fail "template VPA disabled by default"
+    fi
+
+    # VPA enabled
+    out=$(helm template test "$CHART_DIR" --set autoscaling.vpa.enabled=true --show-only templates/vpa.yaml 2>&1)
+    if echo "$out" | grep -q "VerticalPodAutoscaler" && echo "$out" | grep -q "updateMode"; then
+        pass "template VPA enabled"
+    else
+        fail "template VPA enabled"
+    fi
+
+    # --- Read service tests ---
+
+    # No read service for standalone with 1 replica (default)
+    if ! helm template test "$CHART_DIR" --show-only templates/service-read.yaml 2>&1 | grep -q "kind:"; then
+        pass "template no read service with 1 replica"
+    else
+        fail "template no read service with 1 replica"
+    fi
+
+    # Read service created when standalone.replicas > 1
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=3 --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Service" && echo "$out" | grep -q "\-read"; then
+        pass "template read service with multiple replicas"
+    else
+        fail "template read service with multiple replicas"
+    fi
+
+    # No read service in cluster mode
+    if ! helm template test "$CHART_DIR" --set mode=cluster --show-only templates/service-read.yaml 2>&1 | grep -q "kind:"; then
+        pass "template no read service in cluster mode"
+    else
+        fail "template no read service in cluster mode"
+    fi
 }
 
 # --- Deployment Tests ---

@@ -202,6 +202,33 @@ Pod management policy based on mode.
 {{- end }}
 
 {{/*
+Pod anti-affinity based on preset.
+Returns empty string if preset type is empty or affinity is explicitly set.
+*/}}
+{{- define "percona-valkey.podAntiAffinity" -}}
+{{- if and .Values.podAntiAffinityPreset.type (not .Values.affinity) -}}
+{{- $labels := include "percona-valkey.selectorLabels" . -}}
+{{- if eq .Values.podAntiAffinityPreset.type "hard" }}
+podAntiAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchLabels:
+          {{- $labels | nindent 10 }}
+      topologyKey: {{ .Values.podAntiAffinityPreset.topologyKey }}
+{{- else if eq .Values.podAntiAffinityPreset.type "soft" }}
+podAntiAffinity:
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchLabels:
+            {{- $labels | nindent 12 }}
+        topologyKey: {{ .Values.podAntiAffinityPreset.topologyKey }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Nil-safe check for externalAccess.enabled.
 Returns "true" (string) if enabled, empty string otherwise.
 */}}

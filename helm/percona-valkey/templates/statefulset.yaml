@@ -44,21 +44,35 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else }}
+      {{- $antiAffinity := include "percona-valkey.podAntiAffinity" . }}
+      {{- if $antiAffinity }}
+      affinity:
+        {{- $antiAffinity | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled (include "percona-valkey.externalAccessCluster" .) }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled (include "percona-valkey.externalAccessCluster" .) .Values.extraInitContainers }}
       initContainers:
         {{- if .Values.sysctlInit.enabled }}
         - name: sysctl-init
@@ -165,6 +179,9 @@ spec:
           volumeMounts:
             - name: external-config
               mountPath: /external-config
+        {{- end }}
+        {{- with .Values.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- end }}
       containers:
@@ -446,6 +463,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- end }}
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
         - name: config

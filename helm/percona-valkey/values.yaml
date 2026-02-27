@@ -283,6 +283,12 @@ diagnosticMode:
   args:
     - infinity
 
+## @section Extra containers and init containers
+## Additional init containers (run before the valkey container starts)
+extraInitContainers: []
+## Additional sidecar containers (run alongside the valkey container)
+extraContainers: []
+
 ## @section Extra resources
 ## Additional volumes to mount on the StatefulSet
 extraVolumes: []
@@ -301,6 +307,53 @@ resourcePreset: none
 persistentVolumeClaimRetentionPolicy:
   whenDeleted: Retain
   whenScaled: Retain
+
+## @section Autoscaling
+## Horizontal Pod Autoscaler (standalone mode only, requires metrics-server)
+autoscaling:
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    ## Target CPU utilization percentage
+    targetCPU: 80
+    ## Target memory utilization percentage (optional)
+    targetMemory: ""
+    ## Custom metrics (optional, overrides targetCPU/targetMemory)
+    # customMetrics: []
+  ## Vertical Pod Autoscaler (requires VPA controller)
+  vpa:
+    enabled: false
+    ## Update mode: "Off", "Initial", "Auto"
+    updateMode: "Auto"
+    ## Container policies
+    controlledResources:
+      - cpu
+      - memory
+    ## Minimum allowed resources
+    minAllowed: {}
+    ## Maximum allowed resources
+    maxAllowed: {}
+
+## @section Pod scheduling
+## Priority class name for pod scheduling priority
+priorityClassName: ""
+
+## @section Termination
+## Seconds to wait for graceful shutdown before SIGKILL
+terminationGracePeriodSeconds: 30
+
+## @section Topology spread constraints
+## Control how pods are spread across topology domains (nodes, zones, etc.)
+topologySpreadConstraints: []
+
+## @section Pod anti-affinity preset
+## Preset anti-affinity rules. Ignored when affinity is set explicitly.
+## type: "soft" (preferredDuringScheduling) or "hard" (requiredDuringScheduling)
+## topologyKey: e.g. "kubernetes.io/hostname" or "topology.kubernetes.io/zone"
+podAntiAffinityPreset:
+  type: ""
+  topologyKey: "kubernetes.io/hostname"
 
 ## @section Node placement
 nodeSelector: {}

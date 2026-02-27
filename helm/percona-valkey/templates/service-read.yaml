@@ -1,0 +1,29 @@
+{{- if and (ne .Values.mode "cluster") (gt (int .Values.standalone.replicas) 1) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "percona-valkey.fullname" . }}-read
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+    app.kubernetes.io/component: read
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: valkey
+      port: {{ .Values.service.port }}
+      targetPort: valkey
+      protocol: TCP
+    {{- if .Values.tls.enabled }}
+    - name: valkey-tls
+      port: {{ .Values.tls.port }}
+      targetPort: valkey-tls
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "percona-valkey.selectorLabels" . | nindent 4 }}
+{{- end }}
