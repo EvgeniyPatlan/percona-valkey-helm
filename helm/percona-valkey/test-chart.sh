@@ -2002,7 +2002,7 @@ test_template_render() {
     out=$(helm template test "$CHART_DIR" --set dnsPolicy=None \
         --set 'dnsConfig.nameservers[0]=8.8.8.8' \
         --set 'dnsConfig.options[0].name=ndots' \
-        --set 'dnsConfig.options[0].value=5' \
+        --set-string 'dnsConfig.options[0].value=5' \
         --show-only templates/statefulset.yaml 2>&1)
     if echo "$out" | grep -q "dnsPolicy: None" && echo "$out" | grep -q "8.8.8.8" && echo "$out" | grep -q "ndots"; then
         pass "template dnsPolicy and dnsConfig"
@@ -3849,7 +3849,7 @@ test_dns_config() {
         --set auth.password=$PASS \
         --set dnsPolicy=ClusterFirst \
         --set 'dnsConfig.options[0].name=ndots' \
-        --set 'dnsConfig.options[0].value=3' \
+        --set-string 'dnsConfig.options[0].value=3' \
         -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "dns-config install"; cleanup "$rel"; return; }
     pass "dns-config install"
 
