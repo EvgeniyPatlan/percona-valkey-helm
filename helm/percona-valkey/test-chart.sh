@@ -1330,6 +1330,261 @@ test_template_render() {
         fail "template graceful failover no-auth mode"
     fi
 
+    # --- TLS/SSL ---
+
+    # TLS disabled by default (no tls-port in configmap)
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "tls-port"; then
+        pass "template TLS disabled by default"
+    else
+        fail "template TLS disabled by default"
+    fi
+
+    # TLS enabled adds tls-port to configmap
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-port 6380" && echo "$out" | grep -q "tls-cert-file" && echo "$out" | grep -q "tls-ca-cert-file"; then
+        pass "template TLS configmap directives"
+    else
+        fail "template TLS configmap directives"
+    fi
+
+    # TLS custom port
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.port=6443 --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-port 6443"; then
+        pass "template TLS custom port"
+    else
+        fail "template TLS custom port"
+    fi
+
+    # TLS disablePlaintext sets port 0 in configmap
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.disablePlaintext=true --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "port 0"; then
+        pass "template TLS disablePlaintext"
+    else
+        fail "template TLS disablePlaintext"
+    fi
+
+    # TLS replication directive
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.replication=true --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-replication yes"; then
+        pass "template TLS replication"
+    else
+        fail "template TLS replication"
+    fi
+
+    # TLS auth-clients directive
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.authClients=optional --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-auth-clients optional"; then
+        pass "template TLS authClients"
+    else
+        fail "template TLS authClients"
+    fi
+
+    # TLS ciphers
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.ciphers=HIGH --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-ciphers HIGH"; then
+        pass "template TLS ciphers"
+    else
+        fail "template TLS ciphers"
+    fi
+
+    # TLS ciphersuites
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.ciphersuites=TLS_AES_256_GCM_SHA384 --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-ciphersuites TLS_AES_256_GCM_SHA384"; then
+        pass "template TLS ciphersuites"
+    else
+        fail "template TLS ciphersuites"
+    fi
+
+    # TLS cluster mode adds tls-cluster yes
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set mode=cluster --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-cluster yes"; then
+        pass "template TLS cluster mode adds tls-cluster"
+    else
+        fail "template TLS cluster mode adds tls-cluster"
+    fi
+
+    # TLS standalone does NOT add tls-cluster
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "tls-cluster"; then
+        pass "template TLS standalone no tls-cluster"
+    else
+        fail "template TLS standalone no tls-cluster"
+    fi
+
+    # TLS adds port to statefulset
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-tls" && echo "$out" | grep -q "containerPort: 6380"; then
+        pass "template TLS statefulset port"
+    else
+        fail "template TLS statefulset port"
+    fi
+
+    # TLS adds cert volume mount to statefulset
+    if echo "$out" | grep -q "tls-certs" && echo "$out" | grep -q "/etc/valkey/tls"; then
+        pass "template TLS statefulset cert volume mount"
+    else
+        fail "template TLS statefulset cert volume mount"
+    fi
+
+    # TLS cert volume references correct secret
+    if echo "$out" | grep -q "secretName: my-tls"; then
+        pass "template TLS existingSecret used in volume"
+    else
+        fail "template TLS existingSecret used in volume"
+    fi
+
+    # TLS adds port to service
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-tls" && echo "$out" | grep -q "port: 6380"; then
+        pass "template TLS service port"
+    else
+        fail "template TLS service port"
+    fi
+
+    # TLS adds port to headless service
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/service-headless.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-tls" && echo "$out" | grep -q "port: 6380"; then
+        pass "template TLS headless service port"
+    else
+        fail "template TLS headless service port"
+    fi
+
+    # TLS probes use plaintext when disablePlaintext=false
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "\-\-tls"; then
+        pass "template TLS probes use plaintext by default"
+    else
+        fail "template TLS probes use plaintext by default"
+    fi
+
+    # TLS probes use TLS when disablePlaintext=true
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.disablePlaintext=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "\-\-tls" && echo "$out" | grep -q "\-\-cacert"; then
+        pass "template TLS probes with disablePlaintext"
+    else
+        fail "template TLS probes with disablePlaintext"
+    fi
+
+    # TLS metrics sidecar uses rediss:// protocol
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set metrics.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "rediss://localhost:6380" && echo "$out" | grep -q "REDIS_EXPORTER_TLS_CA_CERT_FILE"; then
+        pass "template TLS metrics sidecar config"
+    else
+        fail "template TLS metrics sidecar config"
+    fi
+
+    # TLS metrics sidecar gets cert volume mount
+    if echo "$out" | grep -A2 "name: metrics" | grep -q "" && echo "$out" | grep -B1 -A5 "REDIS_EXPORTER" | grep -q "ca.crt"; then
+        pass "template TLS metrics sidecar cert volume"
+    else
+        fail "template TLS metrics sidecar cert volume"
+    fi
+
+    # TLS cluster-init-job has TLS flags
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set mode=cluster --show-only templates/cluster-init-job.yaml 2>&1)
+    if echo "$out" | grep -q 'TLS_FLAG="--tls' && echo "$out" | grep -q '$TLS_FLAG'; then
+        pass "template TLS cluster-init-job flags"
+    else
+        fail "template TLS cluster-init-job flags"
+    fi
+
+    # TLS cluster-init-job mounts certs
+    if echo "$out" | grep -q "tls-certs" && echo "$out" | grep -q "secretName: my-tls"; then
+        pass "template TLS cluster-init-job cert mount"
+    else
+        fail "template TLS cluster-init-job cert mount"
+    fi
+
+    # TLS cluster-scale-job has TLS flags
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set mode=cluster --show-only templates/cluster-scale-job.yaml 2>&1)
+    if echo "$out" | grep -q 'TLS="--tls' && echo "$out" | grep -q '$TLS'; then
+        pass "template TLS cluster-scale-job flags"
+    else
+        fail "template TLS cluster-scale-job flags"
+    fi
+
+    # TLS test-connection uses TLS flags and cert volume
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q "\-\-tls" && echo "$out" | grep -q "tls-certs" && echo "$out" | grep -q "6380"; then
+        pass "template TLS test-connection"
+    else
+        fail "template TLS test-connection"
+    fi
+
+    # TLS test-connection without TLS has no TLS flags
+    out=$(helm template test "$CHART_DIR" --show-only templates/tests/test-connection.yaml 2>&1)
+    if ! echo "$out" | grep -q "\-\-tls" && ! echo "$out" | grep -q "tls-certs"; then
+        pass "template test-connection no TLS by default"
+    else
+        fail "template test-connection no TLS by default"
+    fi
+
+    # cert-manager Certificate template
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.certManager.enabled=true --set tls.certManager.issuerRef.name=my-issuer --show-only templates/certificate.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Certificate" && echo "$out" | grep -q "issuerRef" && echo "$out" | grep -q "my-issuer"; then
+        pass "template cert-manager Certificate"
+    else
+        fail "template cert-manager Certificate"
+    fi
+
+    # cert-manager Certificate includes wildcard DNS
+    if echo "$out" | grep -q '\*\..*-headless'; then
+        pass "template cert-manager Certificate wildcard DNS"
+    else
+        fail "template cert-manager Certificate wildcard DNS"
+    fi
+
+    # cert-manager Certificate not rendered when certManager disabled
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls 2>&1)
+    if ! echo "$out" | grep -q "kind: Certificate"; then
+        pass "template no Certificate when certManager disabled"
+    else
+        fail "template no Certificate when certManager disabled"
+    fi
+
+    # TLS NOTES.txt shows TLS info (read raw template — NOTES.txt is not accessible via --show-only)
+    local notes_raw=$(cat "$CHART_DIR/templates/NOTES.txt")
+    if echo "$notes_raw" | grep -q "TLS is enabled" && echo "$notes_raw" | grep -q "tls.port"; then
+        pass "template NOTES.txt TLS info"
+    else
+        fail "template NOTES.txt TLS info"
+    fi
+
+    # TLS NOTES.txt with disablePlaintext reference
+    if echo "$notes_raw" | grep -q "plain-text port is disabled"; then
+        pass "template NOTES.txt TLS disablePlaintext"
+    else
+        fail "template NOTES.txt TLS disablePlaintext"
+    fi
+
+    # TLS graceful failover includes TLS flags when plaintext disabled
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.disablePlaintext=true --set mode=cluster --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'TLS="-p.*--tls'; then
+        pass "template TLS graceful failover uses TLS flags"
+    else
+        fail "template TLS graceful failover uses TLS flags"
+    fi
+
+    # TLS disabled in default still has no TLS in statefulset/services
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    ss_clean=$(! echo "$out" | grep -q "tls-certs" && echo "true" || echo "false")
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    svc_clean=$(! echo "$out" | grep -q "valkey-tls" && echo "true" || echo "false")
+    if [ "$ss_clean" = "true" ] && [ "$svc_clean" = "true" ]; then
+        pass "template no TLS artifacts when disabled"
+    else
+        fail "template no TLS artifacts when disabled"
+    fi
+
+    # TLS custom certMountPath
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls --set tls.certMountPath=/custom/certs --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "/custom/certs"; then
+        pass "template TLS custom certMountPath"
+    else
+        fail "template TLS custom certMountPath"
+    fi
+
     # --- Cluster replicasPerPrimary ---
 
     # replicasPerPrimary used in cluster-init-job
@@ -2031,6 +2286,174 @@ test_cluster_scale_down() {
     fi
 
     cleanup "$rel"
+}
+
+test_tls_standalone() {
+    bold "=== TEST: TLS standalone ==="
+    local rel="t-tls-sa"
+    cleanup "$rel"
+
+    # Generate self-signed CA and server certificate
+    local TLS_DIR=$(mktemp -d)
+    openssl genrsa -out "$TLS_DIR/ca.key" 2048 2>/dev/null
+    openssl req -x509 -new -nodes -key "$TLS_DIR/ca.key" -sha256 -days 1 \
+        -out "$TLS_DIR/ca.crt" -subj "/CN=valkey-test-ca" 2>/dev/null
+    openssl genrsa -out "$TLS_DIR/tls.key" 2048 2>/dev/null
+    openssl req -new -key "$TLS_DIR/tls.key" -out "$TLS_DIR/tls.csr" \
+        -subj "/CN=valkey-tls-test" 2>/dev/null
+    cat > "$TLS_DIR/ext.cnf" <<CERTEOF
+[v3_req]
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = localhost
+DNS.2 = *.default.svc.cluster.local
+DNS.3 = ${rel}-percona-valkey
+DNS.4 = ${rel}-percona-valkey-headless
+DNS.5 = ${rel}-percona-valkey.default.svc.cluster.local
+DNS.6 = ${rel}-percona-valkey-headless.default.svc.cluster.local
+DNS.7 = *.${rel}-percona-valkey-headless.default.svc.cluster.local
+CERTEOF
+    openssl x509 -req -in "$TLS_DIR/tls.csr" -CA "$TLS_DIR/ca.crt" -CAkey "$TLS_DIR/ca.key" \
+        -CAcreateserial -out "$TLS_DIR/tls.crt" -days 1 -sha256 \
+        -extensions v3_req -extfile "$TLS_DIR/ext.cnf" 2>/dev/null
+
+    # Create Kubernetes secret
+    kubectl create secret generic "${rel}-tls-secret" \
+        --from-file=tls.crt="$TLS_DIR/tls.crt" \
+        --from-file=tls.key="$TLS_DIR/tls.key" \
+        --from-file=ca.crt="$TLS_DIR/ca.crt" \
+        -n $NAMESPACE 2>/dev/null || true
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set tls.enabled=true \
+        --set tls.existingSecret="${rel}-tls-secret" \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "TLS standalone install"; cleanup "$rel"; kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null; rm -rf "$TLS_DIR"; return; }
+    pass "TLS standalone install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "TLS standalone pod ready"
+    else
+        fail "TLS standalone pod ready"; cleanup "$rel"; kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null; rm -rf "$TLS_DIR"; return
+    fi
+
+    # Verify TLS port is listening
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 --tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "TLS standalone ping on TLS port"
+    else
+        fail "TLS standalone ping on TLS port"
+    fi
+
+    # Verify plaintext port still works (disablePlaintext is false)
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "TLS standalone plaintext port still works"
+    else
+        fail "TLS standalone plaintext port still works"
+    fi
+
+    # Set/Get over TLS
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 --tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key -a $PASS set tls-key tls-value > /dev/null 2>&1
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 --tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key -a $PASS get tls-key 2>/dev/null)
+    if [ "$val" = "tls-value" ]; then
+        pass "TLS standalone set/get over TLS"
+    else
+        fail "TLS standalone set/get over TLS (got: $val)"
+    fi
+
+    # Verify tls-port in running config
+    local tls_port=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS config get tls-port 2>/dev/null | tail -1)
+    if [ "$tls_port" = "6380" ]; then
+        pass "TLS standalone config tls-port=6380"
+    else
+        fail "TLS standalone config tls-port=6380 (got: $tls_port)"
+    fi
+
+    # Helm test should pass (test-connection uses TLS)
+    if helm test "$rel" -n $NAMESPACE > /dev/null 2>&1; then
+        pass "TLS standalone helm test"
+    else
+        fail "TLS standalone helm test"
+    fi
+
+    cleanup "$rel"
+    kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null || true
+    rm -rf "$TLS_DIR"
+}
+
+test_tls_plaintext_disabled() {
+    bold "=== TEST: TLS with plaintext disabled ==="
+    local rel="t-tls-nopt"
+    cleanup "$rel"
+
+    # Generate self-signed CA and server certificate
+    local TLS_DIR=$(mktemp -d)
+    openssl genrsa -out "$TLS_DIR/ca.key" 2048 2>/dev/null
+    openssl req -x509 -new -nodes -key "$TLS_DIR/ca.key" -sha256 -days 1 \
+        -out "$TLS_DIR/ca.crt" -subj "/CN=valkey-test-ca" 2>/dev/null
+    openssl genrsa -out "$TLS_DIR/tls.key" 2048 2>/dev/null
+    openssl req -new -key "$TLS_DIR/tls.key" -out "$TLS_DIR/tls.csr" \
+        -subj "/CN=valkey-tls-nopt" 2>/dev/null
+    cat > "$TLS_DIR/ext.cnf" <<CERTEOF
+[v3_req]
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = localhost
+DNS.2 = *.default.svc.cluster.local
+DNS.3 = ${rel}-percona-valkey
+DNS.4 = ${rel}-percona-valkey-headless
+DNS.5 = ${rel}-percona-valkey.default.svc.cluster.local
+DNS.6 = ${rel}-percona-valkey-headless.default.svc.cluster.local
+DNS.7 = *.${rel}-percona-valkey-headless.default.svc.cluster.local
+CERTEOF
+    openssl x509 -req -in "$TLS_DIR/tls.csr" -CA "$TLS_DIR/ca.crt" -CAkey "$TLS_DIR/ca.key" \
+        -CAcreateserial -out "$TLS_DIR/tls.crt" -days 1 -sha256 \
+        -extensions v3_req -extfile "$TLS_DIR/ext.cnf" 2>/dev/null
+
+    kubectl create secret generic "${rel}-tls-secret" \
+        --from-file=tls.crt="$TLS_DIR/tls.crt" \
+        --from-file=tls.key="$TLS_DIR/tls.key" \
+        --from-file=ca.crt="$TLS_DIR/ca.crt" \
+        -n $NAMESPACE 2>/dev/null || true
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set tls.enabled=true \
+        --set tls.existingSecret="${rel}-tls-secret" \
+        --set tls.disablePlaintext=true \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "TLS plaintext-disabled install"; cleanup "$rel"; kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null; rm -rf "$TLS_DIR"; return; }
+    pass "TLS plaintext-disabled install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "TLS plaintext-disabled pod ready"
+    else
+        fail "TLS plaintext-disabled pod ready"; cleanup "$rel"; kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null; rm -rf "$TLS_DIR"; return
+    fi
+
+    # Verify TLS port works
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 --tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "TLS plaintext-disabled ping on TLS port"
+    else
+        fail "TLS plaintext-disabled ping on TLS port"
+    fi
+
+    # Verify plaintext port is disabled (port 0 in config, connection should fail)
+    local pt_response=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>&1 || true)
+    if echo "$pt_response" | grep -qi "refused\|error\|Could not connect"; then
+        pass "TLS plaintext-disabled plaintext port rejected"
+    else
+        fail "TLS plaintext-disabled plaintext port rejected (got: $pt_response)"
+    fi
+
+    # Helm test should pass via TLS
+    if helm test "$rel" -n $NAMESPACE > /dev/null 2>&1; then
+        pass "TLS plaintext-disabled helm test"
+    else
+        fail "TLS plaintext-disabled helm test"
+    fi
+
+    cleanup "$rel"
+    kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null || true
+    rm -rf "$TLS_DIR"
 }
 
 test_metrics_sidecar() {
@@ -2895,6 +3318,10 @@ main() {
     test_naming_overrides
     echo ""
     test_helm_test_hook
+    echo ""
+    test_tls_standalone
+    echo ""
+    test_tls_plaintext_disabled
     echo ""
     test_metrics_sidecar
     echo ""

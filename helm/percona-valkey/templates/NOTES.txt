@@ -8,7 +8,7 @@ Cluster mode: {{ .Values.cluster.replicas }} nodes with {{ .Values.cluster.repli
 The cluster-init job will automatically form the cluster after all pods are ready.
 
 To check cluster status:
-  kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-0 -- valkey-cli {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}cluster info
+  kubectl exec -n {{ .Release.Namespace }} {{ $fullname }}-0 -- valkey-cli {{ if .Values.auth.enabled }}-a $(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d) {{ end }}{{ if .Values.tls.enabled }}-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt {{ end }}cluster info
 
 {{- else }}
 
@@ -19,10 +19,33 @@ To connect to Valkey:
   export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ $fullname }} -o jsonpath='{.clusterIP}')
   {{- if .Values.auth.enabled }}
   export VALKEY_PASSWORD=$(kubectl get secret -n {{ .Release.Namespace }} {{ include "percona-valkey.secretName" . }} -o jsonpath="{.data.valkey-password}" | base64 -d)
+  {{- if .Values.tls.enabled }}
+  valkey-cli -h $SERVICE_IP -p {{ .Values.tls.port }} --tls --cacert <path-to-ca.crt> -a $VALKEY_PASSWORD
+  {{- else }}
   valkey-cli -h $SERVICE_IP -p {{ .Values.service.port }} -a $VALKEY_PASSWORD
+  {{- end }}
+  {{- else }}
+  {{- if .Values.tls.enabled }}
+  valkey-cli -h $SERVICE_IP -p {{ .Values.tls.port }} --tls --cacert <path-to-ca.crt>
   {{- else }}
   valkey-cli -h $SERVICE_IP -p {{ .Values.service.port }}
+  {{- end }}
   {{- end }}
 
 To run the connection test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if .Values.tls.enabled }}
+
+TLS is enabled on port {{ .Values.tls.port }}.
+{{- if .Values.tls.disablePlaintext }}
+The plain-text port is disabled. All connections require TLS.
+{{- else }}
+Both plain-text ({{ .Values.service.port }}) and TLS ({{ .Values.tls.port }}) ports are available.
+{{- end }}
+{{- if .Values.tls.certManager.enabled }}
+Certificates are managed by cert-manager (issuer: {{ .Values.tls.certManager.issuerRef.name }}).
+{{- else }}
+Certificates are provided via Secret: {{ include "percona-valkey.tlsSecretName" . }}
+{{- end }}
+{{- end }}

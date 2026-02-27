@@ -30,14 +30,43 @@ spec:
               name: {{ include "percona-valkey.secretName" . }}
               key: valkey-password
         {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumeMounts:
+        - name: tls-certs
+          mountPath: {{ .Values.tls.certMountPath }}
+          readOnly: true
+      {{- end }}
       command:
         - sh
         - -c
         - |
+          {{- if .Values.tls.enabled }}
+          {{- $tlsPort := .Values.tls.port }}
+          {{- $tlsFlags := printf "--tls --cacert %s/ca.crt --cert %s/tls.crt --key %s/tls.key" .Values.tls.certMountPath .Values.tls.certMountPath .Values.tls.certMountPath }}
+          {{- if .Values.auth.enabled }}
+          response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ $tlsPort }} {{ $tlsFlags }} -a "$VALKEY_PASSWORD" ping)
+          {{- else }}
+          response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ $tlsPort }} {{ $tlsFlags }} ping)
+          {{- end }}
+          {{- else }}
           {{- if .Values.auth.enabled }}
           response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} -a "$VALKEY_PASSWORD" ping)
           {{- else }}
           response=$(valkey-cli -h {{ include "percona-valkey.fullname" . }} -p {{ .Values.service.port }} ping)
           {{- end }}
+          {{- end }}
           [ "$response" = "PONG" ]
+  {{- if .Values.tls.enabled }}
+  volumes:
+    - name: tls-certs
+      secret:
+        secretName: {{ include "percona-valkey.tlsSecretName" . }}
+        items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          - key: ca.crt
+            path: ca.crt
+  {{- end }}
   restartPolicy: Never

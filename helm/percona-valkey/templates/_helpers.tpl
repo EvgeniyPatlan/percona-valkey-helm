@@ -95,6 +95,28 @@ Secret name (existing or generated).
 {{- end }}
 
 {{/*
+TLS secret name (existing or generated from cert-manager).
+*/}}
+{{- define "percona-valkey.tlsSecretName" -}}
+{{- if .Values.tls.existingSecret }}
+{{- .Values.tls.existingSecret }}
+{{- else }}
+{{- printf "%s-tls" (include "percona-valkey.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+TLS CLI flags for valkey-cli commands (probes, lifecycle hooks, jobs).
+Includes --cert and --key for mutual TLS support (tls-auth-clients yes).
+Returns empty string if TLS is disabled.
+*/}}
+{{- define "percona-valkey.tlsCliFlags" -}}
+{{- if .Values.tls.enabled -}}
+--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key
+{{- end -}}
+{{- end }}
+
+{{/*
 Replica count based on mode.
 */}}
 {{- define "percona-valkey.replicaCount" -}}

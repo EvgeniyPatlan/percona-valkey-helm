@@ -118,6 +118,11 @@ spec:
             - name: valkey
               containerPort: 6379
               protocol: TCP
+            {{- if .Values.tls.enabled }}
+            - name: valkey-tls
+              containerPort: {{ .Values.tls.port }}
+              protocol: TCP
+            {{- end }}
             {{- if eq .Values.mode "cluster" }}
             - name: cluster-bus
               containerPort: {{ .Values.cluster.busPort }}
@@ -181,20 +186,25 @@ spec:
                     {{- else }}
                     AUTH=""
                     {{- end }}
-                    ROLE=$(valkey-cli $AUTH role)
+                    {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+                    {{- else }}
+                    TLS=""
+                    {{- end }}
+                    ROLE=$(valkey-cli $TLS $AUTH role)
                     case "$ROLE" in
                       master*)
-                        valkey-cli $AUTH cluster failover
+                        valkey-cli $TLS $AUTH cluster failover
                         i=0
                         while [ $i -lt 20 ]; do
-                          NEWROLE=$(valkey-cli $AUTH role)
+                          NEWROLE=$(valkey-cli $TLS $AUTH role)
                           case "$NEWROLE" in slave*|replica*) break;; esac
                           sleep 0.5
                           i=$((i+1))
                         done
                         ;;
                     esac
-                    valkey-cli $AUTH shutdown nosave || true
+                    valkey-cli $TLS $AUTH shutdown nosave || true
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
@@ -203,7 +213,13 @@ spec:
                 - sh
                 - -c
                 - |
+                  {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  {{- end }}
+                  {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -a "$VALKEY_PASSWORD" ping )
                   {{- else }}
                   response=$(valkey-cli ping )
@@ -216,6 +232,10 @@ spec:
             successThreshold: {{ .Values.livenessProbe.successThreshold }}
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
+          {{- $tlsProbeFlags := "" }}
+          {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
+          {{- $tlsProbeFlags = printf "-p %d --tls --cacert %s/ca.crt --cert %s/tls.crt --key %s/tls.key" (int .Values.tls.port) .Values.tls.certMountPath .Values.tls.certMountPath .Values.tls.certMountPath }}
+          {{- end }}
           readinessProbe:
             exec:
               command:
@@ -223,13 +243,13 @@ spec:
                 - -c
                 - |
                   {{- if and (eq .Values.mode "cluster") .Values.auth.enabled }}
-                  response=$(valkey-cli -a "$VALKEY_PASSWORD" cluster info )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "$VALKEY_PASSWORD" cluster info )
                   {{- else if eq .Values.mode "cluster" }}
-                  response=$(valkey-cli cluster info )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} cluster info )
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} -a "$VALKEY_PASSWORD" ping )
                   {{- else }}
-                  response=$(valkey-cli ping )
+                  response=$(valkey-cli {{ $tlsProbeFlags }} ping )
                   {{- end }}
                   {{- if eq .Values.mode "cluster" }}
                   case "$response" in *cluster_state:ok*) exit 0;; *) exit 1;; esac
@@ -249,7 +269,13 @@ spec:
                 - sh
                 - -c
                 - |
+                  {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  {{- else }}
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  {{- end }}
+                  {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -a "$VALKEY_PASSWORD" ping )
                   {{- else }}
                   response=$(valkey-cli ping )
@@ -273,6 +299,11 @@ spec:
             {{- if and .Values.auth.enabled .Values.auth.usePasswordFiles }}
             - name: valkey-password
               mountPath: {{ .Values.auth.passwordFilePath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
             {{- end }}
             {{- if eq .Values.image.variant "hardened" }}
@@ -301,7 +332,11 @@ spec:
               protocol: TCP
           env:
             - name: REDIS_ADDR
+              {{- if .Values.tls.enabled }}
+              value: "rediss://localhost:{{ .Values.tls.port }}"
+              {{- else }}
               value: "redis://localhost:{{ .Values.service.port }}"
+              {{- end }}
             {{- if .Values.auth.enabled }}
             - name: REDIS_PASSWORD
               valueFrom:
@@ -309,6 +344,16 @@ spec:
                   name: {{ include "percona-valkey.secretName" . }}
                   key: valkey-password
             {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: REDIS_EXPORTER_TLS_CA_CERT_FILE
+              value: {{ .Values.tls.certMountPath }}/ca.crt
+            {{- end }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+          {{- end }}
           {{- with .Values.metrics.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -325,6 +370,18 @@ spec:
             items:
               - key: valkey-password
                 path: valkey-password
+        {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "percona-valkey.tlsSecretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

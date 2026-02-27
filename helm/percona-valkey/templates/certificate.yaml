@@ -1,0 +1,38 @@
+{{- if and .Values.tls.enabled .Values.tls.certManager.enabled }}
+{{- $fullname := include "percona-valkey.fullname" . }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "percona-valkey.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "percona-valkey.tlsSecretName" . }}
+  duration: {{ .Values.tls.certManager.duration }}
+  renewBefore: {{ .Values.tls.certManager.renewBefore }}
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - {{ $fullname }}
+    - {{ $fullname }}.{{ .Release.Namespace }}
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ $fullname }}-headless
+    - {{ $fullname }}-headless.{{ .Release.Namespace }}
+    - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc
+    - {{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local
+    - "*.{{ $fullname }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+    - localhost
+    {{- range .Values.tls.certManager.additionalDnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.tls.certManager.issuerRef.group }}
+{{- end }}

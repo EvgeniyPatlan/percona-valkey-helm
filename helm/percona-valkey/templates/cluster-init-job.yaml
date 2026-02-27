@@ -44,6 +44,12 @@ spec:
                   name: {{ include "percona-valkey.secretName" . }}
                   key: valkey-password
             {{- end }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tls.certMountPath }}
+              readOnly: true
+          {{- end }}
           command:
             - sh
             - -c
@@ -61,11 +67,17 @@ spec:
               AUTH_FLAG=""
               {{- end }}
 
+              {{- if .Values.tls.enabled }}
+              TLS_FLAG="--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+              {{- else }}
+              TLS_FLAG=""
+              {{- end }}
+
               echo "Waiting for all $REPLICAS pods to be reachable..."
               for i in $(seq 0 $(( REPLICAS - 1 ))); do
                 HOST="{{ $fullname }}-${i}.${HEADLESS}"
                 echo "  Waiting for ${HOST}:${PORT}..."
-                until valkey-cli -h "$HOST" -p "$PORT" $AUTH_FLAG ping 2>/dev/null | grep -q PONG; do
+                until valkey-cli -h "$HOST" -p "$PORT" $AUTH_FLAG $TLS_FLAG ping 2>/dev/null | grep -q PONG; do
                   sleep 2
                 done
                 echo "  ${HOST} is ready."
@@ -73,7 +85,7 @@ spec:
 
               # Check if cluster is already formed (idempotency)
               FIRST_HOST="{{ $fullname }}-0.${HEADLESS}"
-              CLUSTER_STATE=$(valkey-cli -h "$FIRST_HOST" -p "$PORT" $AUTH_FLAG cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+              CLUSTER_STATE=$(valkey-cli -h "$FIRST_HOST" -p "$PORT" $AUTH_FLAG $TLS_FLAG cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
               if [ "$CLUSTER_STATE" = "cluster_state:ok" ]; then
                 echo "Cluster is already formed. Skipping initialization."
                 exit 0
@@ -87,10 +99,23 @@ spec:
               done
 
               echo "Creating Valkey cluster with nodes:${NODES}"
-              valkey-cli --cluster create $AUTH_FLAG \
+              valkey-cli --cluster create $AUTH_FLAG $TLS_FLAG \
                 --cluster-replicas $REPLICAS_PER_PRIMARY \
                 --cluster-yes \
                 $NODES
 
               echo "Cluster initialization complete."
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: {{ include "percona-valkey.tlsSecretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
 {{- end }}

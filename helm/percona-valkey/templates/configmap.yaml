@@ -25,11 +25,34 @@ data:
     # AOF persistence
     appendonly yes
     appendfilename "appendonly.aof"
+    {{- if .Values.tls.enabled }}
+    # TLS configuration
+    tls-port {{ .Values.tls.port }}
+    tls-cert-file {{ .Values.tls.certMountPath }}/tls.crt
+    tls-key-file {{ .Values.tls.certMountPath }}/tls.key
+    tls-ca-cert-file {{ .Values.tls.certMountPath }}/ca.crt
+    tls-auth-clients {{ .Values.tls.authClients }}
+    {{- if .Values.tls.disablePlaintext }}
+    port 0
+    {{- end }}
+    {{- if .Values.tls.replication }}
+    tls-replication yes
+    {{- end }}
+    {{- if .Values.tls.ciphers }}
+    tls-ciphers {{ .Values.tls.ciphers }}
+    {{- end }}
+    {{- if .Values.tls.ciphersuites }}
+    tls-ciphersuites {{ .Values.tls.ciphersuites }}
+    {{- end }}
+    {{- end }}
     {{- if eq .Values.mode "cluster" }}
     # Cluster settings
     cluster-enabled yes
     cluster-config-file /data/nodes.conf
     cluster-node-timeout {{ .Values.cluster.nodeTimeout }}
+    {{- if .Values.tls.enabled }}
+    tls-cluster yes
+    {{- end }}
     {{- end }}
     {{- $cmds := .Values.disableCommands }}
     {{- if and (eq .Values.mode "standalone") .Values.disableCommandsStandalone }}

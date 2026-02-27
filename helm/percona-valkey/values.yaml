@@ -28,6 +28,41 @@ auth:
   ## Directory where password file is mounted
   passwordFilePath: /opt/valkey/secrets
 
+## @section TLS/SSL configuration
+tls:
+  enabled: false
+  ## TLS port (runs alongside plain-text port unless port is set to 0 in config)
+  port: 6380
+  ## Existing Secret containing TLS certificates.
+  ## Must have keys: tls.crt, tls.key, ca.crt
+  existingSecret: ""
+  ## Mount path for certificate files inside the container
+  certMountPath: /etc/valkey/tls
+  ## Enable TLS for replication traffic (standalone with replicas or cluster)
+  replication: false
+  ## Require TLS client authentication: "yes", "no", or "optional"
+  authClients: "no"
+  ## Disable the non-TLS port entirely (set valkey port to 0)
+  disablePlaintext: false
+  ## Optional cipher suites (TLS 1.2)
+  ciphers: ""
+  ## Optional cipher suites (TLS 1.3)
+  ciphersuites: ""
+  ## cert-manager integration
+  certManager:
+    enabled: false
+    ## Issuer or ClusterIssuer reference
+    issuerRef:
+      name: ""
+      kind: Issuer
+      group: cert-manager.io
+    ## Certificate duration (default 90d)
+    duration: 2160h
+    ## Renew before expiry
+    renewBefore: 360h
+    ## Additional DNS names for the certificate
+    additionalDnsNames: []
+
 ## @section Valkey configuration
 config:
   maxmemory: ""

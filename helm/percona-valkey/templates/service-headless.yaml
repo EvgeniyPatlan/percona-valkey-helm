@@ -13,6 +13,11 @@ spec:
     - name: valkey
       port: {{ .Values.service.port }}
       targetPort: valkey
+    {{- if .Values.tls.enabled }}
+    - name: valkey-tls
+      port: {{ .Values.tls.port }}
+      targetPort: valkey-tls
+    {{- end }}
     {{- if eq .Values.mode "cluster" }}
     - name: cluster-bus
       port: {{ .Values.cluster.busPort }}

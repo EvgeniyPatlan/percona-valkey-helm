@@ -16,5 +16,11 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: valkey
       protocol: TCP
+    {{- if .Values.tls.enabled }}
+    - name: valkey-tls
+      port: {{ .Values.tls.port }}
+      targetPort: valkey-tls
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "percona-valkey.selectorLabels" . | nindent 4 }}
