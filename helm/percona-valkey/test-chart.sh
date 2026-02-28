@@ -3154,6 +3154,7 @@ test_template_render() {
         --set acl.enabled=true --set auth.password=$PASS \
         --set 'acl.users.svcuser.existingPasswordSecret=my-secret' \
         --set 'acl.users.svcuser.passwordKey=password' \
+        --set 'acl.users.svcuser.permissions=~* +@all' \
         --show-only templates/statefulset.yaml 2>&1)
     if echo "$out" | grep -q 'sha256sum' && echo "$out" | grep -q '#$HASH'; then
         pass "template acl-init script uses sha256sum for existingPasswordSecret"
@@ -3210,6 +3211,7 @@ test_template_render() {
         --set acl.enabled=true --set auth.password=$PASS \
         --set 'acl.users.svcuser.existingPasswordSecret=my-secret' \
         --set 'acl.users.svcuser.passwordKey=password' \
+        --set 'acl.users.svcuser.permissions=~* +@all' \
         --set initResources.requests.cpu=50m \
         --set initResources.limits.memory=128Mi \
         --show-only templates/statefulset.yaml 2>&1)
