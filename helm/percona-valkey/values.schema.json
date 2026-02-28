@@ -162,6 +162,9 @@
         "disablePlaintext": {
           "type": "boolean"
         },
+        "certKey": { "type": "string" },
+        "keyKey": { "type": "string" },
+        "caKey": { "type": "string" },
         "dhParamsSecret": {
           "type": "string"
         },
@@ -261,6 +264,14 @@
         },
         "precheckBeforeScaleDown": {
           "type": "boolean"
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": { "type": "string" },
+            "storageClass": { "type": "string" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -319,6 +330,14 @@
             "size": {
               "type": "string"
             }
+          },
+          "additionalProperties": false
+        },
+        "dataPersistence": {
+          "type": "object",
+          "properties": {
+            "size": { "type": "string" },
+            "storageClass": { "type": "string" }
           },
           "additionalProperties": false
         },
@@ -583,6 +602,21 @@
         "resources": { "type": "object" },
         "command": { "type": "array", "items": { "type": "string" } },
         "args": { "type": "array", "items": { "type": "string" } },
+        "extraEnvs": { "type": "array" },
+        "extraVolumeMounts": { "type": "array" },
+        "extraSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "mountPath": { "type": "string" }
+            },
+            "required": ["name", "mountPath"],
+            "additionalProperties": false
+          }
+        },
+        "securityContext": { "type": "object" },
         "serviceMonitor": { "type": "object" },
         "podMonitor": { "type": "object" },
         "prometheusRule": { "type": "object" }

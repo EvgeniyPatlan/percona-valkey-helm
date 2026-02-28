@@ -248,6 +248,84 @@ test_lint() {
     else
         fail "lint metrics command"
     fi
+
+    # F11: serviceMonitor relabelings
+    if helm lint "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set 'metrics.serviceMonitor.relabelings[0].sourceLabels[0]=__name__' > /dev/null 2>&1; then
+        pass "lint F11 serviceMonitor relabelings"
+    else
+        fail "lint F11 serviceMonitor relabelings"
+    fi
+
+    # F12: serviceMonitor sampleLimit
+    if helm lint "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set metrics.serviceMonitor.sampleLimit=5000 > /dev/null 2>&1; then
+        pass "lint F12 serviceMonitor sampleLimit"
+    else
+        fail "lint F12 serviceMonitor sampleLimit"
+    fi
+
+    # F13: serviceMonitor honorLabels
+    if helm lint "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set metrics.serviceMonitor.honorLabels=true > /dev/null 2>&1; then
+        pass "lint F13 serviceMonitor honorLabels"
+    else
+        fail "lint F13 serviceMonitor honorLabels"
+    fi
+
+    # F14: metrics extraEnvs
+    if helm lint "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.extraEnvs[0].name=FOO' --set 'metrics.extraEnvs[0].value=bar' > /dev/null 2>&1; then
+        pass "lint F14 metrics extraEnvs"
+    else
+        fail "lint F14 metrics extraEnvs"
+    fi
+
+    # F15: metrics securityContext
+    if helm lint "$CHART_DIR" --set metrics.enabled=true \
+        --set metrics.securityContext.runAsNonRoot=true > /dev/null 2>&1; then
+        pass "lint F15 metrics securityContext"
+    else
+        fail "lint F15 metrics securityContext"
+    fi
+
+    # F16: readOnlyRootFilesystem default (emptyDir mounts added)
+    if helm lint "$CHART_DIR" > /dev/null 2>&1; then
+        pass "lint F16 readOnlyRootFilesystem default"
+    else
+        fail "lint F16 readOnlyRootFilesystem default"
+    fi
+
+    # F18: configurable TLS key names
+    if helm lint "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=x \
+        --set tls.certKey=cert.pem > /dev/null 2>&1; then
+        pass "lint F18 configurable TLS key names"
+    else
+        fail "lint F18 configurable TLS key names"
+    fi
+
+    # F19: default user in acl.users must fail
+    if helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1 | grep -q "default user is auto-managed"; then
+        pass "lint F19 default user protection"
+    else
+        fail "lint F19 default user protection"
+    fi
+
+    # F20: missing permissions must fail
+    if helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.x.password=p' 2>&1 | grep -q "permissions field is required"; then
+        pass "lint F20 permissions required"
+    else
+        fail "lint F20 permissions required"
+    fi
+
+    # F21: per-mode persistence override
+    if helm lint "$CHART_DIR" --set mode=cluster --set cluster.persistence.size=20Gi > /dev/null 2>&1; then
+        pass "lint F21 cluster persistence override"
+    else
+        fail "lint F21 cluster persistence override"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -3394,6 +3472,211 @@ test_template_render() {
         fail "template F10 no command by default"
     else
         pass "template F10 no command by default"
+    fi
+
+    # === F11: relabelings & metricRelabelings ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set 'metrics.serviceMonitor.relabelings[0].sourceLabels[0]=__name__' \
+        --set 'metrics.serviceMonitor.relabelings[0].action=keep' \
+        --show-only templates/servicemonitor.yaml 2>&1)
+    if echo "$out" | grep -q "relabelings:" && echo "$out" | grep -q "action: keep"; then
+        pass "template F11 relabelings in ServiceMonitor"
+    else
+        fail "template F11 relabelings in ServiceMonitor"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.podMonitor.enabled=true \
+        --set 'metrics.podMonitor.metricRelabelings[0].sourceLabels[0]=__name__' \
+        --set 'metrics.podMonitor.metricRelabelings[0].action=drop' \
+        --show-only templates/podmonitor.yaml 2>&1)
+    if echo "$out" | grep -q "metricRelabelings:" && echo "$out" | grep -q "action: drop"; then
+        pass "template F11 metricRelabelings in PodMonitor"
+    else
+        fail "template F11 metricRelabelings in PodMonitor"
+    fi
+
+    # === F12: sampleLimit & targetLimit ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set metrics.serviceMonitor.sampleLimit=5000 \
+        --show-only templates/servicemonitor.yaml 2>&1)
+    if echo "$out" | grep -q "sampleLimit: 5000"; then
+        pass "template F12 sampleLimit in ServiceMonitor"
+    else
+        fail "template F12 sampleLimit in ServiceMonitor"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.podMonitor.enabled=true \
+        --set metrics.podMonitor.targetLimit=100 \
+        --show-only templates/podmonitor.yaml 2>&1)
+    if echo "$out" | grep -q "targetLimit: 100"; then
+        pass "template F12 targetLimit in PodMonitor"
+    else
+        fail "template F12 targetLimit in PodMonitor"
+    fi
+
+    # === F13: honorLabels & podTargetLabels ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+        --set metrics.serviceMonitor.honorLabels=true \
+        --show-only templates/servicemonitor.yaml 2>&1)
+    if echo "$out" | grep -q "honorLabels: true"; then
+        pass "template F13 honorLabels in ServiceMonitor"
+    else
+        fail "template F13 honorLabels in ServiceMonitor"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.podMonitor.enabled=true \
+        --set 'metrics.podMonitor.podTargetLabels[0]=app' \
+        --show-only templates/podmonitor.yaml 2>&1)
+    if echo "$out" | grep -q "podTargetLabels:" && echo "$out" | grep -q "app"; then
+        pass "template F13 podTargetLabels in PodMonitor"
+    else
+        fail "template F13 podTargetLabels in PodMonitor"
+    fi
+
+    # === F14: metrics exporter extraEnvs, extraSecrets, extraVolumeMounts ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.extraEnvs[0].name=MY_EXPORTER_VAR' --set 'metrics.extraEnvs[0].value=test' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "MY_EXPORTER_VAR"; then
+        pass "template F14 extraEnvs in metrics container"
+    else
+        fail "template F14 extraEnvs in metrics container"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.extraSecrets[0].name=my-secret' --set 'metrics.extraSecrets[0].mountPath=/etc/secrets' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "metrics-secret-my-secret" && echo "$out" | grep -q "/etc/secrets"; then
+        pass "template F14 extraSecrets volume+mount"
+    else
+        fail "template F14 extraSecrets volume+mount"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.extraVolumeMounts[0].name=extra-vol' --set 'metrics.extraVolumeMounts[0].mountPath=/extra' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "/extra"; then
+        pass "template F14 extraVolumeMounts"
+    else
+        fail "template F14 extraVolumeMounts"
+    fi
+
+    # Verify absent by default
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "metrics-secret-" && ! echo "$out" | grep -q "MY_EXPORTER_VAR"; then
+        pass "template F14 absent by default"
+    else
+        fail "template F14 absent by default"
+    fi
+
+    # === F15: metrics configurable securityContext ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set metrics.securityContext.runAsUser=1000 \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "runAsUser: 1000"; then
+        pass "template F15 custom securityContext renders"
+    else
+        fail "template F15 custom securityContext renders"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -A5 'name: metrics' | grep -q "readOnlyRootFilesystem: true"; then
+        pass "template F15 default securityContext matches"
+    else
+        fail "template F15 default securityContext matches"
+    fi
+
+    # === F16: read-only root filesystem by default ===
+
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "mountPath: /tmp" && echo "$out" | grep -q "mountPath: /run/valkey"; then
+        pass "template F16 emptyDir mounts present by default"
+    else
+        fail "template F16 emptyDir mounts present by default"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set containerSecurityContext.readOnlyRootFilesystem=false \
+        --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "mountPath: /tmp"; then
+        pass "template F16 emptyDir mounts absent when readOnly=false"
+    else
+        fail "template F16 emptyDir mounts absent when readOnly=false"
+    fi
+
+    # === F17: seccompProfile ===
+
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "RuntimeDefault"; then
+        pass "template F17 seccompProfile renders"
+    else
+        fail "template F17 seccompProfile renders"
+    fi
+
+    # === F18: configurable TLS key names ===
+
+    out=$(helm template test "$CHART_DIR" \
+        --set tls.enabled=true --set tls.existingSecret=my-tls \
+        --set tls.certKey=server.crt --set tls.keyKey=server.key --set tls.caKey=root-ca.crt \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "key: server.crt" && echo "$out" | grep -q "key: server.key" && echo "$out" | grep -q "key: root-ca.crt"; then
+        pass "template F18 custom key names in volumes"
+    else
+        fail "template F18 custom key names in volumes"
+    fi
+
+    out=$(helm template test "$CHART_DIR" \
+        --set tls.enabled=true --set tls.existingSecret=my-tls \
+        --set tls.certKey=server.crt --set tls.keyKey=server.key --set tls.caKey=root-ca.crt \
+        --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-cert-file .*/server.crt" && echo "$out" | grep -q "tls-ca-cert-file .*/root-ca.crt"; then
+        pass "template F18 custom key names in configmap"
+    else
+        fail "template F18 custom key names in configmap"
+    fi
+
+    # === F19: default user protection ===
+
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1)
+    if echo "$out" | grep -q "default user is auto-managed"; then
+        pass "template F19 validation error for default user"
+    else
+        fail "template F19 validation error for default user"
+    fi
+
+    # === F20: permissions required ===
+
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.x.password=p' 2>&1)
+    if echo "$out" | grep -q "permissions field is required"; then
+        pass "template F20 validation error for missing permissions"
+    else
+        fail "template F20 validation error for missing permissions"
+    fi
+
+    # === F21: per-mode persistence overrides ===
+
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set cluster.persistence.size=20Gi \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "storage: 20Gi"; then
+        pass "template F21 cluster persistence size overrides global"
+    else
+        fail "template F21 cluster persistence size overrides global"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set mode=cluster \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "storage: 8Gi"; then
+        pass "template F21 fallback to global when not set"
+    else
+        fail "template F21 fallback to global when not set"
     fi
 }
 

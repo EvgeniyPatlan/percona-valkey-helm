@@ -68,7 +68,7 @@ spec:
               {{- end }}
 
               {{- if .Values.tls.enabled }}
-              TLS="--tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+              TLS="--tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}"
               {{- else }}
               TLS=""
               {{- end }}
@@ -196,11 +196,11 @@ spec:
           secret:
             secretName: {{ include "percona-valkey.tlsSecretName" . }}
             items:
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
-              - key: ca.crt
-                path: ca.crt
+              - key: {{ .Values.tls.certKey }}
+                path: {{ .Values.tls.certKey }}
+              - key: {{ .Values.tls.keyKey }}
+                path: {{ .Values.tls.keyKey }}
+              - key: {{ .Values.tls.caKey }}
+                path: {{ .Values.tls.caKey }}
       {{- end }}
 {{- end }}

@@ -89,6 +89,10 @@ tls:
   authClients: "no"
   ## Disable the non-TLS port entirely (set valkey port to 0)
   disablePlaintext: false
+  ## Key names in the TLS Secret (override for custom certificate Secrets)
+  certKey: "tls.crt"
+  keyKey: "tls.key"
+  caKey: "ca.crt"
   ## Existing Secret containing DH parameters file (key: dhparams.pem)
   ## for enhanced Diffie-Hellman key exchange security
   dhParamsSecret: ""
@@ -139,6 +143,10 @@ cluster:
   ## Pre-check safety validation before scale-down operations.
   ## Runs as a pre-upgrade Helm hook Job. Fails the upgrade if scale-down is unsafe.
   precheckBeforeScaleDown: true
+  ## Optional persistence overrides for cluster mode (defaults to global persistence.*)
+  persistence:
+    size: ""
+    storageClass: ""
 
 ## @section Standalone mode settings
 standalone:
@@ -175,6 +183,10 @@ sentinel:
   persistence:
     enabled: false
     size: 1Gi
+  ## Optional persistence overrides for data pods in sentinel mode
+  dataPersistence:
+    size: ""
+    storageClass: ""
   ## Scheduling for Sentinel pods
   podAntiAffinityPreset:
     type: ""
@@ -207,7 +219,7 @@ securityContext:
     type: RuntimeDefault
 
 containerSecurityContext:
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
   capabilities:
     drop:
@@ -358,17 +370,45 @@ metrics:
   command: []
   ## Override the exporter container args
   args: []
+  ## Extra environment variables for the exporter container
+  extraEnvs: []
+  ## Extra volume mounts for the exporter container
+  extraVolumeMounts: []
+  ## Extra secrets to mount as volumes into the exporter container
+  extraSecrets: []
+    # - name: my-exporter-secret
+    #   mountPath: /etc/exporter/secrets
+  ## Security context for the exporter container
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
   serviceMonitor:
     enabled: false
     namespace: ""
     interval: 30s
     scrapeTimeout: ""
     labels: {}
+    relabelings: []
+    metricRelabelings: []
+    sampleLimit: ""
+    targetLimit: ""
+    honorLabels: false
+    podTargetLabels: []
   podMonitor:
     enabled: false
     namespace: ""
     interval: 30s
     labels: {}
+    relabelings: []
+    metricRelabelings: []
+    sampleLimit: ""
+    targetLimit: ""
+    honorLabels: false
+    podTargetLabels: []
   prometheusRule:
     enabled: false
     namespace: ""

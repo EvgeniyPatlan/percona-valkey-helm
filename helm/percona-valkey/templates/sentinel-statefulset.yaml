@@ -199,9 +199,9 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "$VALKEY_PASSWORD" ping )
                   {{- else }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
@@ -222,9 +222,9 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "$VALKEY_PASSWORD" ping )
                   {{- else }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
@@ -277,12 +277,12 @@ spec:
           secret:
             secretName: {{ include "percona-valkey.tlsSecretName" . }}
             items:
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
-              - key: ca.crt
-                path: ca.crt
+              - key: {{ .Values.tls.certKey }}
+                path: {{ .Values.tls.certKey }}
+              - key: {{ .Values.tls.keyKey }}
+                path: {{ .Values.tls.keyKey }}
+              - key: {{ .Values.tls.caKey }}
+                path: {{ .Values.tls.caKey }}
         {{- end }}
         {{- if eq .Values.image.variant "hardened" }}
         - name: tmp

@@ -17,10 +17,31 @@ spec:
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
+  {{- if .Values.metrics.serviceMonitor.sampleLimit }}
+  sampleLimit: {{ .Values.metrics.serviceMonitor.sampleLimit }}
+  {{- end }}
+  {{- if .Values.metrics.serviceMonitor.targetLimit }}
+  targetLimit: {{ .Values.metrics.serviceMonitor.targetLimit }}
+  {{- end }}
+  {{- with .Values.metrics.serviceMonitor.podTargetLabels }}
+  podTargetLabels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   endpoints:
     - port: metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       {{- if .Values.metrics.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- end }}
+      {{- if .Values.metrics.serviceMonitor.honorLabels }}
+      honorLabels: true
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

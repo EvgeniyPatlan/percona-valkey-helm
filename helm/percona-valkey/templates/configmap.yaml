@@ -39,9 +39,9 @@ data:
     {{- if .Values.tls.enabled }}
     # TLS configuration
     tls-port {{ .Values.tls.port }}
-    tls-cert-file {{ .Values.tls.certMountPath }}/tls.crt
-    tls-key-file {{ .Values.tls.certMountPath }}/tls.key
-    tls-ca-cert-file {{ .Values.tls.certMountPath }}/ca.crt
+    tls-cert-file {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }}
+    tls-key-file {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}
+    tls-ca-cert-file {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }}
     tls-auth-clients {{ .Values.tls.authClients }}
     {{- if .Values.tls.disablePlaintext }}
     port 0

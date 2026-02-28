@@ -396,7 +396,7 @@ spec:
                     AUTH=""
                     {{- end }}
                     {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
-                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}"
                     {{- else }}
                     TLS=""
                     {{- end }}
@@ -432,8 +432,8 @@ spec:
                     AUTH=""
                     {{- end }}
                     {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
-                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
-                    SENTINEL_TLS="-p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key"
+                    TLS="-p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}"
+                    SENTINEL_TLS="-p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}"
                     {{- else }}
                     TLS=""
                     SENTINEL_TLS="-p {{ .Values.sentinel.port }}"
@@ -466,9 +466,9 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "{{ $passCmd }}" ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "{{ $passCmd }}" ping )
                   {{- else }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -a "{{ $passCmd }}" ping )
@@ -485,7 +485,7 @@ spec:
           {{- if .Values.readinessProbe.enabled }}
           {{- $tlsProbeFlags := "" }}
           {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
-          {{- $tlsProbeFlags = printf "-p %d --tls --cacert %s/ca.crt --cert %s/tls.crt --key %s/tls.key" (int .Values.tls.port) .Values.tls.certMountPath .Values.tls.certMountPath .Values.tls.certMountPath }}
+          {{- $tlsProbeFlags = printf "-p %d --tls --cacert %s/%s --cert %s/%s --key %s/%s" (int .Values.tls.port) .Values.tls.certMountPath .Values.tls.caKey .Values.tls.certMountPath .Values.tls.certKey .Values.tls.certMountPath .Values.tls.keyKey }}
           {{- end }}
           {{- $readyPassCmd := "$VALKEY_PASSWORD" }}
           {{- if .Values.auth.passwordRotation.enabled }}
@@ -530,9 +530,9 @@ spec:
                 - |
                   {{- if and .Values.tls.enabled .Values.tls.disablePlaintext }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key -a "{{ $startPassCmd }}" ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "{{ $startPassCmd }}" ping )
                   {{- else }}
-                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key ping )
+                  response=$(valkey-cli -p {{ .Values.tls.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
                   response=$(valkey-cli -a "{{ $startPassCmd }}" ping )
@@ -595,7 +595,7 @@ spec:
               mountPath: /external-config
               readOnly: true
             {{- end }}
-            {{- if eq .Values.image.variant "hardened" }}
+            {{- if or (eq .Values.image.variant "hardened") .Values.containerSecurityContext.readOnlyRootFilesystem }}
             - name: tmp
               mountPath: /tmp
             - name: run
@@ -627,12 +627,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
+            {{- toYaml .Values.metrics.securityContext | nindent 12 }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
@@ -653,13 +648,26 @@ spec:
             {{- end }}
             {{- if .Values.tls.enabled }}
             - name: REDIS_EXPORTER_TLS_CA_CERT_FILE
-              value: {{ .Values.tls.certMountPath }}/ca.crt
+              value: {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }}
             {{- end }}
-          {{- if .Values.tls.enabled }}
+            {{- with .Values.metrics.extraEnvs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.tls.enabled .Values.metrics.extraVolumeMounts .Values.metrics.extraSecrets }}
           volumeMounts:
+            {{- if .Values.tls.enabled }}
             - name: tls-certs
               mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
+            {{- end }}
+            {{- with .Values.metrics.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- range .Values.metrics.extraSecrets }}
+            - name: metrics-secret-{{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
           {{- end }}
           {{- with .Values.metrics.resources }}
           resources:
@@ -754,12 +762,12 @@ spec:
           secret:
             secretName: {{ include "percona-valkey.tlsSecretName" . }}
             items:
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
-              - key: ca.crt
-                path: ca.crt
+              - key: {{ .Values.tls.certKey }}
+                path: {{ .Values.tls.certKey }}
+              - key: {{ .Values.tls.keyKey }}
+                path: {{ .Values.tls.keyKey }}
+              - key: {{ .Values.tls.caKey }}
+                path: {{ .Values.tls.caKey }}
         {{- end }}
         {{- if and .Values.tls.enabled .Values.tls.dhParamsSecret }}
         - name: tls-dhparams
@@ -819,7 +827,12 @@ spec:
           configMap:
             name: {{ .name }}
         {{- end }}
-        {{- if eq .Values.image.variant "hardened" }}
+        {{- range .Values.metrics.extraSecrets }}
+        - name: metrics-secret-{{ .name }}
+          secret:
+            secretName: {{ .name }}
+        {{- end }}
+        {{- if or (eq .Values.image.variant "hardened") .Values.containerSecurityContext.readOnlyRootFilesystem }}
         - name: tmp
           emptyDir:
             medium: Memory
@@ -857,11 +870,12 @@ spec:
       spec:
         accessModes:
           {{- toYaml .Values.persistence.accessModes | nindent 10 }}
-        {{- if .Values.persistence.storageClass }}
-        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- $sc := include "percona-valkey.persistenceStorageClass" . -}}
+        {{- if $sc }}
+        storageClassName: {{ $sc | quote }}
         {{- end }}
         resources:
           requests:
-            storage: {{ .Values.persistence.size }}
+            storage: {{ include "percona-valkey.persistenceSize" . }}
   {{- end }}
 {{- end }}

@@ -153,7 +153,7 @@ Returns empty string if TLS is disabled.
 */}}
 {{- define "percona-valkey.tlsCliFlags" -}}
 {{- if .Values.tls.enabled -}}
---tls --cacert {{ .Values.tls.certMountPath }}/ca.crt --cert {{ .Values.tls.certMountPath }}/tls.crt --key {{ .Values.tls.certMountPath }}/tls.key
+--tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }}
 {{- end -}}
 {{- end }}
 
@@ -360,7 +360,13 @@ Validate values and fail with collected errors.
 {{- end -}}
 {{- /* ACL per-user validations */ -}}
 {{- if .Values.acl.enabled -}}
+{{- if hasKey .Values.acl.users "default" -}}
+  {{- $errors = append $errors "acl.users.default: the default user is auto-managed by the chart — do not define it in acl.users" -}}
+{{- end -}}
 {{- range $user, $cfg := .Values.acl.users -}}
+{{- if not $cfg.permissions -}}
+  {{- $errors = append $errors (printf "acl.users.%s: permissions field is required" $user) -}}
+{{- end -}}
 {{- if and $cfg.existingPasswordSecret (not $cfg.passwordKey) -}}
   {{- $errors = append $errors (printf "acl.users.%s: existingPasswordSecret requires passwordKey" $user) -}}
 {{- end -}}
@@ -381,5 +387,31 @@ Validate values and fail with collected errors.
 {{- end -}}
 {{- if $errors -}}
   {{- fail (printf "\n\npercona-valkey configuration errors:\n\n%s\n" (join "\n" $errors)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Effective persistence size: per-mode override > global.
+*/}}
+{{- define "percona-valkey.persistenceSize" -}}
+{{- if and (eq .Values.mode "cluster") .Values.cluster.persistence.size -}}
+  {{- .Values.cluster.persistence.size -}}
+{{- else if and (eq .Values.mode "sentinel") .Values.sentinel.dataPersistence.size -}}
+  {{- .Values.sentinel.dataPersistence.size -}}
+{{- else -}}
+  {{- .Values.persistence.size -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Effective persistence storageClass: per-mode override > global.
+*/}}
+{{- define "percona-valkey.persistenceStorageClass" -}}
+{{- if and (eq .Values.mode "cluster") .Values.cluster.persistence.storageClass -}}
+  {{- .Values.cluster.persistence.storageClass -}}
+{{- else if and (eq .Values.mode "sentinel") .Values.sentinel.dataPersistence.storageClass -}}
+  {{- .Values.sentinel.dataPersistence.storageClass -}}
+{{- else -}}
+  {{- .Values.persistence.storageClass -}}
 {{- end -}}
 {{- end }}
