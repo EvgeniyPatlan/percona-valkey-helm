@@ -29,11 +29,13 @@
 This Helm chart deploys Percona Valkey on Kubernetes with full production readiness:
 
 - **Three deployment modes:** Standalone, Cluster (hash-slot sharding), and Sentinel (automatic failover)
-- **Enterprise security:** Authentication, ACL (multi-user access control), TLS/SSL with cert-manager integration, password rotation
-- **High availability:** Automatic failover, pod disruption budgets, graceful failover hooks
+- **Enterprise security:** Authentication, ACL (structured multi-user access control), TLS/SSL with cert-manager integration and DH parameters, password rotation
+- **High availability:** Automatic failover, pod disruption budgets, graceful failover hooks, write quorum
 - **Observability:** Prometheus metrics exporter, ServiceMonitor, PodMonitor, PrometheusRule
-- **Operations:** Scheduled backups, rolling restarts on config change, horizontal and vertical autoscaling
+- **Operations:** Scheduled backups, rolling restarts on config change, horizontal and vertical autoscaling, configuration validation
+- **Flexible deployment:** StatefulSet or Deployment (cache-only), diskless replication, simple env map
 - **Hardened images:** Read-only root filesystem, dropped capabilities, minimal attack surface
+- **Values validation:** JSON Schema (`values.schema.json`) and template-level collect-then-fail validation
 
 ### Chart Metadata
 
@@ -61,12 +63,14 @@ percona-valkey-helm/
     Chart.yaml                          # Chart metadata
     values.yaml                         # Default configuration values
     .helmignore                         # Files to ignore during packaging
+    values.schema.json                  # JSON Schema for values validation
     test-chart.sh                       # Comprehensive test suite (5000+ lines)
     templates/
-      _helpers.tpl                      # 20 named template helpers
+      _helpers.tpl                      # 25 named template helpers
       NOTES.txt                         # Post-install instructions
       # --- Core Resources ---
       statefulset.yaml                  # Main Valkey StatefulSet (standalone/cluster/sentinel data)
+      deployment.yaml                   # Standalone Deployment (cache-only, no persistence)
       configmap.yaml                    # Valkey configuration (valkey.conf)
       secret.yaml                       # Password and ACL secrets
       service.yaml                      # Main ClusterIP/LoadBalancer/NodePort service
@@ -105,7 +109,7 @@ percona-valkey-helm/
         test-connection.yaml            # Helm test hook pod
 ```
 
-**Total: 31 template files** (including `_helpers.tpl`, `NOTES.txt`, and `serviceaccount.yaml`)
+**Total: 32 template files** (including `_helpers.tpl`, `NOTES.txt`, `deployment.yaml`, and `serviceaccount.yaml`)
 
 ### Image Variants
 
@@ -175,6 +179,29 @@ The chart supports three deployment modes, selected via the `mode` parameter.
 3. If `standalone.replicas > 1`, additional pods start but do NOT automatically replicate — they are independent instances suitable for read scaling behind a read service.
 4. Authentication is handled via `VALKEY_PASSWORD` environment variable (from Secret) or password files.
 5. A separate read service (`<fullname>-read`) is created when multiple replicas exist to distribute read traffic.
+
+#### Deployment Mode (Cache-Only)
+
+When `standalone.useDeployment: true`, the chart renders a **Deployment** instead of a StatefulSet. This is ideal for ephemeral, cache-only workloads where persistence is not needed.
+
+**Requirements:**
+- `mode: standalone` (validated — fails with other modes)
+- `persistence.enabled: false` (validated — Deployments cannot use PVC templates)
+
+**Differences from StatefulSet:**
+- Uses an `emptyDir` volume for `/data` instead of a PersistentVolumeClaim
+- Supports `standalone.strategy` for rolling update configuration (e.g., `RollingUpdate`, `Recreate`)
+- No pod ordinals or stable network identities
+- Data is lost when pods are rescheduled
+
+```yaml
+standalone:
+  useDeployment: true
+  strategy:
+    type: RollingUpdate
+persistence:
+  enabled: false
+```
 
 ### 3.2 Cluster Mode (`mode: cluster`)
 
@@ -420,7 +447,34 @@ Multi-user authentication with per-user command and key restrictions. **Requires
 3. The **default user** line is auto-generated: `user default on ><password> ~* &* +@all`
 4. Custom user rules from `acl.users` are appended after the default user
 
-#### Example
+#### Structured ACL Users
+
+Users are defined as a structured map under `acl.users`. Each key is a username with the following properties:
+
+| Property | Description |
+|----------|-------------|
+| `permissions` | ACL rule string (e.g., `~cache:* +@read +@write`). Defaults to `~* &* +@all` if omitted. |
+| `password` | Inline password (stored in the chart-managed Secret) |
+| `existingPasswordSecret` | Name of an existing Secret containing the password (mutually exclusive with `password`) |
+| `passwordKey` | Key within the `existingPasswordSecret` (required when `existingPasswordSecret` is set) |
+
+**Validation rules:**
+- Cannot set both `password` and `existingPasswordSecret` on the same user
+- `existingPasswordSecret` requires `passwordKey` to be set
+
+#### Two Rendering Paths
+
+**Simple path** (all users have inline passwords):
+- No init container needed
+- ACL Secret is mounted directly at `/etc/valkey/acl`
+
+**Init container path** (any user has `existingPasswordSecret`):
+- An `acl-init` init container assembles the final `users.acl` file
+- Base ACL (default user + inline users) is copied from the chart Secret
+- External Secret passwords are read from per-user mounted volumes
+- Assembled ACL is written to an `emptyDir` volume mounted at `/etc/valkey/acl`
+
+#### Example — Inline Passwords
 
 ```yaml
 auth:
@@ -428,9 +482,13 @@ auth:
   password: "mypass"
 acl:
   enabled: true
-  users: |
-    user app on >apppass ~cache:* +@read +@write -@dangerous
-    user monitor on >monpass +client +info +slowlog +latency +ping
+  users:
+    app:
+      permissions: "~cache:* +@read +@write -@dangerous"
+      password: "apppass"
+    monitor:
+      permissions: "+client +info +slowlog +latency +ping"
+      password: "monpass"
 ```
 
 This creates three users:
@@ -438,13 +496,29 @@ This creates three users:
 - `app`: Read/write access only to keys matching `cache:*`, no dangerous commands
 - `monitor`: Read-only monitoring commands
 
+#### Example — External Password Secret
+
+```yaml
+acl:
+  enabled: true
+  users:
+    app:
+      permissions: "~cache:* +@read +@write"
+      existingPasswordSecret: "app-credentials"
+      passwordKey: "password"
+```
+
 #### Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `acl.enabled` | `false` | Enable ACL |
-| `acl.existingSecret` | `""` | Existing Secret with `users.acl` key |
-| `acl.users` | `""` | Inline ACL rules (appended after auto-generated default user) |
+| `acl.existingSecret` | `""` | Existing Secret with `users.acl` key (ignores `acl.users` when set) |
+| `acl.users` | `{}` | Structured ACL user definitions (map of username to config) |
+| `acl.users.<name>.permissions` | `"~* &* +@all"` | ACL rule string |
+| `acl.users.<name>.password` | `""` | Inline password |
+| `acl.users.<name>.existingPasswordSecret` | `""` | Existing Secret name for password |
+| `acl.users.<name>.passwordKey` | `""` | Key in the existing Secret |
 
 ### 4.3 TLS/SSL
 
@@ -474,6 +548,24 @@ Additional directives are added based on mode:
 - **Cluster mode:** `tls-cluster yes` (encrypts cluster bus traffic)
 - **Sentinel mode:** `tls-replication yes` (encrypts replication traffic)
 - **Replication enabled:** `tls-replication yes`
+- **DH parameters:** `tls-dh-params-file /etc/valkey/tls/dhparams.pem` (when `tls.dhParamsSecret` is set)
+
+#### DH Parameters
+
+For enhanced Diffie-Hellman key exchange security, you can provide pre-generated DH parameters via a Secret:
+
+```yaml
+tls:
+  enabled: true
+  dhParamsSecret: "my-dh-params"
+```
+
+The Secret must contain a key named `dhparams.pem`. The file is mounted as a subPath at `<certMountPath>/dhparams.pem`. Generate DH parameters with:
+
+```bash
+openssl dhparam -out dhparams.pem 2048
+kubectl create secret generic my-dh-params --from-file=dhparams.pem
+```
 
 #### TLS-Aware Components
 
@@ -502,6 +594,7 @@ All chart components support TLS when enabled:
 | `tls.replication` | `false` | TLS for replication |
 | `tls.authClients` | `"no"` | Client cert requirement: `yes`, `no`, `optional` |
 | `tls.disablePlaintext` | `false` | Disable plaintext port |
+| `tls.dhParamsSecret` | `""` | Secret with DH parameters (key: `dhparams.pem`) |
 | `tls.ciphers` | `""` | TLS 1.2 cipher suites |
 | `tls.ciphersuites` | `""` | TLS 1.3 cipher suites |
 
@@ -956,7 +1049,17 @@ extraVolumeMounts:
     mountPath: /scratch
 ```
 
-#### Extra Environment Variables
+#### Simple Environment Variables
+
+```yaml
+env:
+  TZ: "UTC"
+  MY_CUSTOM_VAR: "value"
+```
+
+#### Extra Environment Variables (Full Spec)
+
+For complex env vars with `valueFrom`, use `extraEnvVars`:
 
 ```yaml
 extraEnvVars:
@@ -1035,6 +1138,92 @@ persistentVolumeClaimRetentionPolicy:
   whenScaled: Retain     # Retain or Delete
 ```
 
+### 4.20 Validation Helpers
+
+The chart includes template-level validation that catches dangerous or impossible configurations at render time using a **collect-then-fail** pattern. All validation errors are collected and reported at once.
+
+#### Validation Rules
+
+| Rule | Condition | Error Message |
+|------|-----------|---------------|
+| ACL requires auth | `acl.enabled` without `auth.enabled` | `acl.enabled requires auth.enabled=true` |
+| Sentinel no external access | `externalAccess.enabled` with `mode=sentinel` | `externalAccess is not supported in sentinel mode` |
+| Password rotation requires auth | `auth.passwordRotation.enabled` without `auth.enabled` | `auth.passwordRotation requires auth.enabled=true` |
+| Persistence for HA modes | `persistence.enabled=false` with `mode=cluster` or `mode=sentinel` | `persistence.enabled=false with mode=<cluster\|sentinel> risks data loss` |
+| Cluster minimum replicas | `cluster.replicas < 6` with `mode=cluster` | `cluster.replicas must be >= 6 (3 primaries + 3 replicas minimum)` |
+| TLS plaintext requires TLS | `tls.disablePlaintext` without `tls.enabled` | `tls.disablePlaintext requires tls.enabled=true` |
+| Deployment mode requires standalone | `standalone.useDeployment` with `mode != standalone` | `standalone.useDeployment requires mode=standalone` |
+| Deployment mode requires no persistence | `standalone.useDeployment` with `persistence.enabled` | `standalone.useDeployment requires persistence.enabled=false` |
+| ACL user missing passwordKey | `existingPasswordSecret` without `passwordKey` | `acl.users.<name>: existingPasswordSecret requires passwordKey` |
+| ACL user dual password | Both `password` and `existingPasswordSecret` set | `acl.users.<name>: cannot set both password and existingPasswordSecret` |
+
+Validation is invoked at the top of `configmap.yaml`, so it runs during any `helm template`, `helm install`, or `helm upgrade` operation.
+
+### 4.21 Simple Environment Variables (`env`)
+
+The `env` parameter provides a convenient way to set simple key-value environment variables on the Valkey container without the verbosity of `extraEnvVars`.
+
+```yaml
+env:
+  TZ: "UTC"
+  MY_CUSTOM_VAR: "value"
+```
+
+This renders as standard Kubernetes env entries:
+
+```yaml
+env:
+  - name: TZ
+    value: "UTC"
+  - name: MY_CUSTOM_VAR
+    value: "value"
+```
+
+For complex env vars (e.g., `valueFrom`, `configMapKeyRef`, `fieldRef`), use `extraEnvVars` instead. Both `env` and `extraEnvVars` can be used together — `env` entries are rendered first, followed by `extraEnvVars`.
+
+**Scope:** The `env` map is injected into the main Valkey container only (not Sentinel, not Jobs).
+
+### 4.22 Valkey Log Level (`config.logLevel`)
+
+Controls the Valkey server log verbosity:
+
+```yaml
+config:
+  logLevel: "notice"   # debug, verbose, notice, warning
+```
+
+When set, adds `loglevel <value>` to `valkey.conf`. When empty (default), Valkey uses its built-in default (`notice`).
+
+### 4.23 Diskless Replication Sync (`config.disklessSync`)
+
+Enables disk-free replication where the primary streams RDB data directly to replicas over the network, bypassing the disk:
+
+```yaml
+config:
+  disklessSync: true
+```
+
+When enabled, adds `repl-diskless-sync yes` to `valkey.conf`. This is useful when disk I/O is a bottleneck but network bandwidth is abundant. Particularly beneficial in cloud environments with slow disk but fast network.
+
+### 4.24 Write Quorum (`config.minReplicasToWrite` / `config.minReplicasMaxLag`)
+
+Provides write safety by requiring a minimum number of replicas to acknowledge writes:
+
+```yaml
+config:
+  minReplicasToWrite: 1    # At least 1 replica must be connected
+  minReplicasMaxLag: 10    # Replica must have reported within 10 seconds
+```
+
+When `minReplicasToWrite > 0`, the following directives are added to `valkey.conf`:
+
+```
+min-replicas-to-write 1
+min-replicas-max-lag 10
+```
+
+This prevents the primary from accepting writes when too few replicas are connected, reducing the risk of data loss during network partitions. Set to `0` (default) to disable.
+
 ---
 
 ## 5. Configuration Reference
@@ -1078,7 +1267,11 @@ persistentVolumeClaimRetentionPolicy:
 |-----------|------|---------|-------------|
 | `acl.enabled` | bool | `false` | Enable ACL |
 | `acl.existingSecret` | string | `""` | Existing Secret with `users.acl` key |
-| `acl.users` | string | `""` | Inline ACL rules |
+| `acl.users` | object | `{}` | Structured ACL user definitions (map of username to config) |
+| `acl.users.<name>.permissions` | string | `"~* &* +@all"` | ACL rule string |
+| `acl.users.<name>.password` | string | `""` | Inline password |
+| `acl.users.<name>.existingPasswordSecret` | string | `""` | Existing Secret name for password |
+| `acl.users.<name>.passwordKey` | string | `""` | Key in the existing Secret |
 
 ### TLS/SSL Configuration
 
@@ -1091,6 +1284,7 @@ persistentVolumeClaimRetentionPolicy:
 | `tls.replication` | bool | `false` | TLS for replication traffic |
 | `tls.authClients` | string | `"no"` | Client cert requirement |
 | `tls.disablePlaintext` | bool | `false` | Disable non-TLS port |
+| `tls.dhParamsSecret` | string | `""` | Secret with DH parameters (key: `dhparams.pem`) |
 | `tls.ciphers` | string | `""` | TLS 1.2 cipher suites |
 | `tls.ciphersuites` | string | `""` | TLS 1.3 cipher suites |
 | `tls.certManager.enabled` | bool | `false` | Enable cert-manager |
@@ -1108,6 +1302,10 @@ persistentVolumeClaimRetentionPolicy:
 | `config.maxmemory` | string | `""` | Max memory limit |
 | `config.maxmemoryPolicy` | string | `""` | Eviction policy |
 | `config.bind` | string | `"0.0.0.0"` | Bind address |
+| `config.logLevel` | string | `""` | Log level: `debug`, `verbose`, `notice`, `warning` |
+| `config.disklessSync` | bool | `false` | Enable diskless replication sync |
+| `config.minReplicasToWrite` | int | `0` | Minimum connected replicas for writes (0 = disabled) |
+| `config.minReplicasMaxLag` | int | `10` | Max replica lag (seconds) for write quorum |
 | `config.extraFlags` | string | `""` | Extra CLI flags via VALKEY_EXTRA_FLAGS |
 | `config.customConfig` | string | `""` | Custom valkey.conf content |
 
@@ -1126,6 +1324,8 @@ persistentVolumeClaimRetentionPolicy:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `standalone.replicas` | int | `1` | Number of Valkey instances |
+| `standalone.useDeployment` | bool | `false` | Use Deployment instead of StatefulSet (requires `persistence.enabled=false`) |
+| `standalone.strategy.type` | string | `"RollingUpdate"` | Deployment strategy (only used with `useDeployment`) |
 
 ### Sentinel Mode Settings
 
@@ -1356,7 +1556,8 @@ Explicit `resources.limits`/`resources.requests` always override presets.
 | `extraContainers` | list | `[]` | Additional sidecar containers |
 | `extraVolumes` | list | `[]` | Additional volumes |
 | `extraVolumeMounts` | list | `[]` | Additional volume mounts |
-| `extraEnvVars` | list | `[]` | Additional environment variables |
+| `env` | object | `{}` | Simple key-value environment variables |
+| `extraEnvVars` | list | `[]` | Additional environment variables (full spec) |
 
 ### Pod Scheduling
 
@@ -1423,17 +1624,18 @@ Explicit `resources.limits`/`resources.requests` always override presets.
 
 ## 6. Helper Templates Reference
 
-The chart defines 20 named templates in `_helpers.tpl`:
+The chart defines 25 named templates in `_helpers.tpl`:
 
 | Template | Description | Usage |
 |----------|-------------|-------|
 | `percona-valkey.name` | Chart name (truncated to 63 chars). Uses `nameOverride` if set. | Labels, selectors |
 | `percona-valkey.fullname` | Fully qualified app name (truncated to 63 chars). Uses `fullnameOverride`, or combines release name + chart name. | Resource names |
 | `percona-valkey.chart` | Chart name + version string (e.g., `percona-valkey-0.1.0`). | `helm.sh/chart` label |
-| `percona-valkey.labels` | Common labels: chart, selector labels, version, managed-by. | All resource metadata |
+| `percona-valkey.labels` | Common labels: chart, selector labels, version, managed-by, commonLabels. | All resource metadata |
 | `percona-valkey.selectorLabels` | Selector labels: `app.kubernetes.io/name` + `app.kubernetes.io/instance`. | StatefulSet selectors, services |
-| `percona-valkey.image` | Resolves container image with tag based on variant. RPM: `repo:appVersion`, hardened: `repo:appVersion-hardened`. | StatefulSet, sentinel StatefulSet |
+| `percona-valkey.image` | Resolves container image with tag based on variant. RPM: `repo:appVersion`, hardened: `repo:appVersion-hardened`. | StatefulSet, Deployment, sentinel StatefulSet |
 | `percona-valkey.rpmImage` | Always returns RPM variant image. Supports `image.jobs.repository` and `image.jobs.tag` overrides. | Jobs, init containers, test pod |
+| `percona-valkey.metricsImage` | Metrics exporter image with optional global registry prefix. | Metrics sidecar container |
 | `percona-valkey.serviceAccountName` | ServiceAccount name: fullname if created, `default` otherwise. | All pods |
 | `percona-valkey.secretName` | Secret name: `auth.existingSecret` or fullname. | Password references |
 | `percona-valkey.aclSecretName` | ACL Secret name: `acl.existingSecret` if provided, otherwise fullname (shares the main password Secret). | ACL volume mount |
@@ -1441,12 +1643,16 @@ The chart defines 20 named templates in `_helpers.tpl`:
 | `percona-valkey.tlsCliFlags` | TLS CLI flags for valkey-cli: `--tls --cacert ... --cert ... --key ...`. Returns empty string if TLS disabled. | Probes, Jobs, lifecycle hooks |
 | `percona-valkey.replicaCount` | Replica count based on mode: `cluster.replicas`, `sentinel.replicas`, or `standalone.replicas`. | StatefulSet spec |
 | `percona-valkey.resourcePreset` | Returns resources dict for preset name (nano, micro, small, medium, large, xlarge). | Resource resolution |
-| `percona-valkey.resources` | Resolves effective resources: explicit values override preset. | StatefulSet containers |
+| `percona-valkey.resources` | Resolves effective resources: explicit values override preset. | StatefulSet/Deployment containers |
 | `percona-valkey.podManagementPolicy` | Pod management: explicit override, or `Parallel` for cluster, `OrderedReady` for others. | StatefulSet spec |
-| `percona-valkey.podAntiAffinity` | Generates anti-affinity rules from preset. Returns empty if type is empty or affinity is explicitly set. | StatefulSet pod spec |
+| `percona-valkey.podAntiAffinity` | Generates anti-affinity rules from preset. Returns empty if type is empty or affinity is explicitly set. | StatefulSet/Deployment pod spec |
 | `percona-valkey.externalAccessEnabled` | Nil-safe check: returns `"true"` if `externalAccess.enabled`. | Conditional rendering |
 | `percona-valkey.externalAccessCluster` | Returns `"true"` if external access enabled AND cluster mode. | Per-pod services, RBAC, init container |
 | `percona-valkey.externalAccessStandalone` | Returns `"true"` if external access enabled AND standalone mode. | Main service type changes |
+| `percona-valkey.aclNeedsInitContainer` | Returns `"true"` if any ACL user has `existingPasswordSecret`. | ACL init container rendering |
+| `percona-valkey.aclInlineUsers` | Renders ACL lines for users with inline passwords (skips users with `existingPasswordSecret`). | Secret ACL content |
+| `percona-valkey.useDeployment` | Returns `"true"` if `standalone.useDeployment` is set and mode is standalone. | Deployment vs StatefulSet rendering |
+| `percona-valkey.validateValues` | Collects configuration errors and fails with all errors at once. | configmap.yaml (invoked first) |
 
 ---
 
@@ -1525,7 +1731,17 @@ helm install my-valkey ./helm/percona-valkey \
 helm install my-valkey ./helm/percona-valkey \
   --set auth.password="adminpass" \
   --set acl.enabled=true \
-  --set 'acl.users=user app on >apppass ~cache:* +@read +@write -@dangerous'
+  --set 'acl.users.app.password=apppass' \
+  --set 'acl.users.app.permissions=~cache:* +@read +@write -@dangerous'
+```
+
+#### Standalone Deployment (Cache-Only)
+
+```bash
+helm install my-valkey ./helm/percona-valkey \
+  --set auth.password="my-secure-password" \
+  --set standalone.useDeployment=true \
+  --set persistence.enabled=false
 ```
 
 #### Enable Backups
@@ -1813,8 +2029,8 @@ After `helm install`, the NOTES.txt output provides:
 4. **External access info:** LoadBalancer IP or NodePort discovery commands
 5. **Feature-specific notes:**
    - Password rotation: How to patch the Secret
-   - ACL: How to connect as custom users
-   - Backup: Schedule, retention, manual trigger, restore procedure
+   - ACL: How to connect as custom users (with init container info when using external password Secrets)
+   - Backup: Schedule, retention, manual trigger, restore procedure (with cluster-mode shard warning)
    - TLS: Port info, plaintext status, certificate source
 6. **Helm test command:** `helm test <release>`
 
@@ -1890,7 +2106,7 @@ NAMESPACE="default"
 SKIP_HARDENED="${SKIP_HARDENED:-false}"
 ```
 
-### 9.2 Lint Tests (11 Tests)
+### 9.2 Lint Tests (17+ Tests)
 
 Lint tests validate that `helm lint` passes for all supported configurations.
 
@@ -1907,8 +2123,14 @@ Lint tests validate that `helm lint` passes for all supported configurations.
 | 9 | lint backup enabled | `backup.enabled=true` | Validates backup CronJob configuration |
 | 10 | lint sentinel/rpm | `mode=sentinel` | Validates sentinel configuration |
 | 11 | lint sentinel/hardened | `mode=sentinel, image.variant=hardened` | Validates sentinel + hardened combination |
+| 12 | lint env map | `env.TZ=UTC` | Validates env map configuration |
+| 13 | lint logLevel | `config.logLevel=notice` | Validates log level setting |
+| 14 | lint disklessSync | `config.disklessSync=true` | Validates diskless sync setting |
+| 15 | lint minReplicasToWrite | `config.minReplicasToWrite=1` | Validates write quorum setting |
+| 16 | lint dhParamsSecret | `tls.dhParamsSecret=my-dh` | Validates DH parameters setting |
+| 17 | lint useDeployment | `standalone.useDeployment=true, persistence.enabled=false` | Validates Deployment mode |
 
-### 9.3 Template Render Tests (~270 Assertions)
+### 9.3 Template Render Tests (~320 Assertions)
 
 Template tests use `helm template` to render manifests and verify their contents with `grep`, `jq`, or string matching. They are organized by feature area.
 
@@ -2061,14 +2283,20 @@ Template tests use `helm template` to render manifests and verify their contents
 - runtimeClassName rendered, absent by default
 - dnsPolicy and dnsConfig rendered, absent by default
 
-#### ACL (10 tests)
+#### ACL (14 tests)
 - ACL disabled by default (no aclfile)
 - ACL enabled: aclfile in ConfigMap, users.acl in Secret
-- ACL volume mount and acl-config volume in StatefulSet
-- ACL existingSecret references, no chart-managed users.acl
+- Inline user: users.acl key in Secret with structured rendering
+- Inline user: direct secret mount, no init container
+- existingPasswordSecret: acl-init container present
+- existingPasswordSecret: acl-assembled + acl-base volumes
+- existingPasswordSecret: external secret volume mounted
+- existingSecret: uses external name, ignores users
 - ACL disabled: no acl-config in StatefulSet
 - ACL + cluster mode lint
 - ACL + external access masterauth handling
+- Validation: missing passwordKey causes error
+- Validation: both password + existingPasswordSecret causes error
 
 #### Cluster Precheck (4 tests)
 - Precheck job present in cluster mode
@@ -2142,6 +2370,45 @@ Template tests use `helm template` to render manifests and verify their contents
 - User lifecycle overrides graceful failover
 - Uses shell builtins only (hardened compatible)
 - No-auth mode (AUTH="")
+
+#### Validation Helpers (9 tests)
+- ACL without auth fails
+- Sentinel + externalAccess fails
+- passwordRotation without auth fails
+- Cluster without persistence fails
+- Sentinel without persistence fails
+- Cluster replicas < 6 fails
+- TLS disablePlaintext without TLS fails
+- Valid cluster config renders OK
+- Standalone without persistence allowed
+
+#### Simple Environment Variables (4 tests)
+- env map renders in statefulset
+- env map empty by default
+- env map NOT in sentinel-statefulset
+- env map + extraEnvVars coexist
+
+#### Config Parameters (7 tests)
+- logLevel renders in configmap
+- logLevel absent when empty
+- disklessSync renders repl-diskless-sync
+- disklessSync absent when false
+- minReplicasToWrite renders min-replicas directives
+- minReplicasToWrite absent when 0
+- customConfig renders in configmap
+
+#### DH Parameters (3 tests)
+- DH params volume mount in statefulset
+- DH params volume definition
+- DH params directive in configmap
+
+#### Deployment Mode (6 tests)
+- useDeployment renders Deployment instead of StatefulSet
+- Deployment uses emptyDir for data
+- Deployment strategy rendered
+- StatefulSet suppressed when useDeployment is true
+- Deployment renders all standard features (probes, security, etc.)
+- useDeployment with non-standalone mode fails validation
 
 #### Edge Cases (7 tests)
 - test-connection.yaml renders, uses auth, no auth when disabled
@@ -2355,8 +2622,8 @@ SKIP_HARDENED=true bash test-chart.sh
 #### Phases
 
 1. **Phase 1 — Static Tests (no cluster required)**
-   - `test_lint()` — All 11 lint tests
-   - `test_template_render()` — All ~250 template assertions
+   - `test_lint()` — All 17+ lint tests
+   - `test_template_render()` — All ~320 template assertions
 
 2. **Phase 2 — Deployment Tests (requires running cluster)**
    - All 40+ deployment tests run sequentially
@@ -2497,6 +2764,14 @@ The `lookup` function used for password preservation requires cluster access. Wh
 ### HPA Only for Standalone
 
 Horizontal Pod Autoscaler is only supported in standalone mode. Cluster and sentinel modes have fixed topologies that cannot be dynamically scaled via HPA metrics.
+
+### Deployment Mode Is Cache-Only
+
+When using `standalone.useDeployment: true`, data is stored in an `emptyDir` volume and is lost when pods are rescheduled. This mode is designed exclusively for ephemeral cache workloads. Persistence must be disabled (`persistence.enabled: false`), which is enforced by validation.
+
+### Backup in Cluster Mode
+
+Backup in cluster mode captures data from a single shard (the pod specified by `backup.sourceOrdinal`) only. For a full cluster backup, run `CLUSTER SAVECONFIG` on each shard or use an external backup tool.
 
 ### Network Policy Coverage
 
