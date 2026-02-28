@@ -120,6 +120,7 @@
         "existingSecret": {
           "type": "string"
         },
+        "replicationUser": { "type": "string" },
         "users": {
           "type": "object",
           "additionalProperties": {
@@ -399,7 +400,10 @@
         },
         "annotations": {
           "type": "object"
-        }
+        },
+        "clusterIP": { "type": "string" },
+        "loadBalancerClass": { "type": "string" },
+        "appProtocol": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -423,7 +427,10 @@
         },
         "annotations": {
           "type": "object"
-        }
+        },
+        "keepOnUninstall": { "type": "boolean" },
+        "subPath": { "type": "string" },
+        "hostPath": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -574,6 +581,8 @@
         },
         "port": { "type": "integer" },
         "resources": { "type": "object" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "args": { "type": "array", "items": { "type": "string" } },
         "serviceMonitor": { "type": "object" },
         "podMonitor": { "type": "object" },
         "prometheusRule": { "type": "object" }
@@ -610,6 +619,30 @@
     },
     "extraVolumeMounts": {
       "type": "array"
+    },
+    "extraValkeySecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "mountPath": { "type": "string" }
+        },
+        "required": ["name", "mountPath"],
+        "additionalProperties": false
+      }
+    },
+    "extraValkeyConfigs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "mountPath": { "type": "string" }
+        },
+        "required": ["name", "mountPath"],
+        "additionalProperties": false
+      }
     },
     "env": {
       "type": "object",

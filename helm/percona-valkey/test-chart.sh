@@ -197,6 +197,57 @@ test_lint() {
     else
         fail "lint initResources"
     fi
+
+    # F4: hostPath
+    if helm lint "$CHART_DIR" --set persistence.enabled=false --set persistence.hostPath=/mnt/data > /dev/null 2>&1; then
+        pass "lint hostPath"
+    else
+        fail "lint hostPath"
+    fi
+
+    # F5: keepOnUninstall
+    if helm lint "$CHART_DIR" --set persistence.keepOnUninstall=true > /dev/null 2>&1; then
+        pass "lint keepOnUninstall"
+    else
+        fail "lint keepOnUninstall"
+    fi
+
+    # F6: subPath
+    if helm lint "$CHART_DIR" --set persistence.subPath=mydata > /dev/null 2>&1; then
+        pass "lint subPath"
+    else
+        fail "lint subPath"
+    fi
+
+    # F7: extraValkeySecrets
+    if helm lint "$CHART_DIR" --set 'extraValkeySecrets[0].name=s' --set 'extraValkeySecrets[0].mountPath=/m' > /dev/null 2>&1; then
+        pass "lint extraValkeySecrets"
+    else
+        fail "lint extraValkeySecrets"
+    fi
+
+    # F8: replicationUser
+    if helm lint "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS \
+        --set acl.replicationUser=repluser \
+        --set 'acl.users.repluser.password=replpass' --set 'acl.users.repluser.permissions=+replconf +psync +ping' > /dev/null 2>&1; then
+        pass "lint replicationUser"
+    else
+        fail "lint replicationUser"
+    fi
+
+    # F9: service fields
+    if helm lint "$CHART_DIR" --set service.clusterIP=10.0.0.100 --set service.appProtocol=redis > /dev/null 2>&1; then
+        pass "lint service clusterIP/appProtocol"
+    else
+        fail "lint service clusterIP/appProtocol"
+    fi
+
+    # F10: metrics command
+    if helm lint "$CHART_DIR" --set metrics.enabled=true --set 'metrics.command[0]=/bin/exporter' > /dev/null 2>&1; then
+        pass "lint metrics command"
+    else
+        fail "lint metrics command"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -3122,6 +3173,227 @@ test_template_render() {
         pass "template schema rejects invalid type"
     else
         fail "template schema rejects invalid type"
+    fi
+
+    # === F4: hostPath ===
+
+    out=$(helm template test "$CHART_DIR" --set persistence.enabled=false --set persistence.hostPath=/mnt/data \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'path: /mnt/data'; then
+        pass "template F4 hostPath in statefulset"
+    else
+        fail "template F4 hostPath in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set persistence.hostPath=/mnt/data --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q 'path: /mnt/data'; then
+        pass "template F4 hostPath in deployment"
+    else
+        fail "template F4 hostPath in deployment"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set persistence.enabled=false \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'emptyDir: {}'; then
+        pass "template F4 emptyDir when no hostPath"
+    else
+        fail "template F4 emptyDir when no hostPath"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set persistence.enabled=true --set persistence.hostPath=/mnt 2>&1 || true)
+    if echo "$out" | grep -q 'mutually exclusive'; then
+        pass "template F4 validation hostPath+persistence.enabled"
+    else
+        fail "template F4 validation hostPath+persistence.enabled"
+    fi
+
+    # === F5: keepOnUninstall ===
+
+    out=$(helm template test "$CHART_DIR" --set persistence.keepOnUninstall=true \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'helm.sh/resource-policy: keep'; then
+        pass "template F5 keepOnUninstall annotation present"
+    else
+        fail "template F5 keepOnUninstall annotation present"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'resource-policy'; then
+        fail "template F5 keepOnUninstall absent by default"
+    else
+        pass "template F5 keepOnUninstall absent by default"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set persistence.keepOnUninstall=true \
+        --set 'persistence.annotations.backup\.velero\.io/backup-volumes=data' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'resource-policy: keep' && echo "$out" | grep -q 'backup.velero.io'; then
+        pass "template F5 keepOnUninstall merges with annotations"
+    else
+        fail "template F5 keepOnUninstall merges with annotations"
+    fi
+
+    # === F6: subPath ===
+
+    out=$(helm template test "$CHART_DIR" --set persistence.subPath=mydata \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'subPath: mydata'; then
+        pass "template F6 subPath in statefulset"
+    else
+        fail "template F6 subPath in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set persistence.subPath=mydata --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q 'subPath: mydata'; then
+        pass "template F6 subPath in deployment"
+    else
+        fail "template F6 subPath in deployment"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set persistence.subPath=mydata \
+        --set volumePermissions.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'subPath: mydata'; then
+        pass "template F6 subPath in volume-permissions init"
+    else
+        fail "template F6 subPath in volume-permissions init"
+    fi
+
+    # === F7: extraValkeySecrets/Configs ===
+
+    out=$(helm template test "$CHART_DIR" \
+        --set 'extraValkeySecrets[0].name=mysecret' --set 'extraValkeySecrets[0].mountPath=/etc/valkey/extra' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'extra-secret-mysecret'; then
+        pass "template F7 extraValkeySecrets in statefulset"
+    else
+        fail "template F7 extraValkeySecrets in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" \
+        --set 'extraValkeyConfigs[0].name=mycm' --set 'extraValkeyConfigs[0].mountPath=/etc/valkey/extra-cm' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'extra-config-mycm'; then
+        pass "template F7 extraValkeyConfigs in statefulset"
+    else
+        fail "template F7 extraValkeyConfigs in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set 'extraValkeySecrets[0].name=mysecret' --set 'extraValkeySecrets[0].mountPath=/etc/valkey/extra' \
+        --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q 'extra-secret-mysecret'; then
+        pass "template F7 extraValkeySecrets in deployment"
+    else
+        fail "template F7 extraValkeySecrets in deployment"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'extra-secret\|extra-config'; then
+        fail "template F7 empty by default"
+    else
+        pass "template F7 empty by default"
+    fi
+
+    # === F8: replicationUser ===
+
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set acl.replicationUser=repluser \
+        --set 'acl.users.repluser.password=replpass' --set 'acl.users.repluser.permissions=+replconf +psync +ping' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'masteruser repluser'; then
+        pass "template F8 masteruser in cluster"
+    else
+        fail "template F8 masteruser in cluster"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set acl.replicationUser=repluser \
+        --set 'acl.users.repluser.password=replpass' --set 'acl.users.repluser.permissions=+replconf +psync +ping' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'masteruser repluser'; then
+        pass "template F8 masteruser in sentinel"
+    else
+        fail "template F8 masteruser in sentinel"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.appuser.password=apppass' --set 'acl.users.appuser.permissions=~* +@all' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'masteruser'; then
+        fail "template F8 absent by default"
+    else
+        pass "template F8 absent by default"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS \
+        --set acl.replicationUser=baduser 2>&1 || true)
+    if echo "$out" | grep -q "must be defined in acl.users"; then
+        pass "template F8 validation missing user"
+    else
+        fail "template F8 validation missing user"
+    fi
+
+    # === F9: service fields ===
+
+    out=$(helm template test "$CHART_DIR" --set service.clusterIP=10.0.0.100 \
+        --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q 'clusterIP: 10.0.0.100'; then
+        pass "template F9 clusterIP renders"
+    else
+        fail "template F9 clusterIP renders"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set service.type=LoadBalancer --set service.loadBalancerClass=myclass \
+        --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q 'loadBalancerClass: myclass'; then
+        pass "template F9 loadBalancerClass renders"
+    else
+        fail "template F9 loadBalancerClass renders"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set service.appProtocol=redis \
+        --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q 'appProtocol: redis'; then
+        pass "template F9 appProtocol renders"
+    else
+        fail "template F9 appProtocol renders"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q 'clusterIP:\|loadBalancerClass:\|appProtocol:'; then
+        fail "template F9 absent by default"
+    else
+        pass "template F9 absent by default"
+    fi
+
+    # === F10: metrics command/args ===
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.command[0]=/custom-exporter' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q '/custom-exporter'; then
+        pass "template F10 command in statefulset"
+    else
+        fail "template F10 command in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --set 'metrics.args[0]=--debug' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q '\-\-debug'; then
+        pass "template F10 args in statefulset"
+    else
+        fail "template F10 args in statefulset"
+    fi
+
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -B1 'securityContext' | grep -q 'command:'; then
+        fail "template F10 no command by default"
+    else
+        pass "template F10 no command by default"
     fi
 }
 

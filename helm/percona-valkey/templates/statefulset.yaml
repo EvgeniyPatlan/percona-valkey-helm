@@ -122,6 +122,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
           {{- with (.Values.volumePermissions.resources | default .Values.initResources) }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -277,7 +280,11 @@ spec:
               EXTRA_ARGS="--cluster-announce-ip $ANNOUNCE_IP --cluster-announce-port $ANNOUNCE_PORT --cluster-announce-bus-port $ANNOUNCE_BUS_PORT"
               {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
               {{- if .Values.acl.enabled }}
+              {{- if .Values.acl.replicationUser }}
+              EXTRA_ARGS="$EXTRA_ARGS --masteruser {{ .Values.acl.replicationUser }} --masterauth $REPL_USER_PASSWORD"
+              {{- else }}
               EXTRA_ARGS="$EXTRA_ARGS --masterauth $VALKEY_PASSWORD"
+              {{- end }}
               {{- else }}
               EXTRA_ARGS="$EXTRA_ARGS --requirepass $VALKEY_PASSWORD --masterauth $VALKEY_PASSWORD"
               {{- end }}
@@ -296,7 +303,11 @@ spec:
               EXTRA_ARGS=""
               {{- if and .Values.auth.enabled (not .Values.auth.usePasswordFiles) }}
               {{- if .Values.acl.enabled }}
+              {{- if .Values.acl.replicationUser }}
+              EXTRA_ARGS="$EXTRA_ARGS --masteruser {{ .Values.acl.replicationUser }} --masterauth $REPL_USER_PASSWORD"
+              {{- else }}
               EXTRA_ARGS="$EXTRA_ARGS --masterauth $VALKEY_PASSWORD"
+              {{- end }}
               {{- else }}
               EXTRA_ARGS="$EXTRA_ARGS --requirepass $VALKEY_PASSWORD --masterauth $VALKEY_PASSWORD"
               {{- end }}
@@ -324,6 +335,19 @@ spec:
                   name: {{ include "percona-valkey.secretName" . }}
                   key: valkey-password
             {{- end }}
+            {{- end }}
+            {{- if and .Values.acl.enabled .Values.acl.replicationUser }}
+            {{- $replCfg := index .Values.acl.users .Values.acl.replicationUser }}
+            - name: REPL_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if $replCfg.existingPasswordSecret }}
+                  name: {{ $replCfg.existingPasswordSecret }}
+                  key: {{ $replCfg.passwordKey }}
+                  {{- else }}
+                  name: {{ include "percona-valkey.fullname" . }}
+                  key: repl-user-password
+                  {{- end }}
             {{- end }}
             {{- if .Values.config.maxmemory }}
             - name: VALKEY_MAXMEMORY
@@ -529,6 +553,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
             - name: config
               mountPath: /etc/valkey
             {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
@@ -577,10 +604,28 @@ spec:
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- range .Values.extraValkeySecrets }}
+            - name: extra-secret-{{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- range .Values.extraValkeyConfigs }}
+            - name: extra-config-{{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
         {{- if .Values.metrics.enabled }}
         - name: metrics
           image: {{ include "percona-valkey.metricsImage" . }}
           imagePullPolicy: {{ .Values.metrics.image.pullPolicy }}
+          {{- with .Values.metrics.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.metrics.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -764,6 +809,16 @@ spec:
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- range .Values.extraValkeySecrets }}
+        - name: extra-secret-{{ .name }}
+          secret:
+            secretName: {{ .name }}
+        {{- end }}
+        {{- range .Values.extraValkeyConfigs }}
+        - name: extra-config-{{ .name }}
+          configMap:
+            name: {{ .name }}
+        {{- end }}
         {{- if eq .Values.image.variant "hardened" }}
         - name: tmp
           emptyDir:
@@ -774,7 +829,13 @@ spec:
         {{- end }}
         {{- if not .Values.persistence.enabled }}
         - name: data
+          {{- if .Values.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.persistence.hostPath }}
+            type: DirectoryOrCreate
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- end }}
   {{- if .Values.persistentVolumeClaimRetentionPolicy }}
   persistentVolumeClaimRetentionPolicy:
@@ -784,9 +845,14 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: data
-        {{- with .Values.persistence.annotations }}
+        {{- if or .Values.persistence.annotations .Values.persistence.keepOnUninstall }}
         annotations:
+          {{- if .Values.persistence.keepOnUninstall }}
+          helm.sh/resource-policy: keep
+          {{- end }}
+          {{- with .Values.persistence.annotations }}
           {{- toYaml . | nindent 10 }}
+          {{- end }}
         {{- end }}
       spec:
         accessModes:

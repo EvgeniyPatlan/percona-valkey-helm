@@ -259,6 +259,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+              {{- if .Values.persistence.subPath }}
+              subPath: {{ .Values.persistence.subPath }}
+              {{- end }}
             - name: config
               mountPath: /etc/valkey
             {{- if and .Values.auth.enabled (or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled) }}
@@ -296,10 +299,28 @@ spec:
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- range .Values.extraValkeySecrets }}
+            - name: extra-secret-{{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- range .Values.extraValkeyConfigs }}
+            - name: extra-config-{{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
         {{- if .Values.metrics.enabled }}
         - name: metrics
           image: {{ include "percona-valkey.metricsImage" . }}
           imagePullPolicy: {{ .Values.metrics.image.pullPolicy }}
+          {{- with .Values.metrics.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.metrics.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -390,6 +411,16 @@ spec:
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- range .Values.extraValkeySecrets }}
+        - name: extra-secret-{{ .name }}
+          secret:
+            secretName: {{ .name }}
+        {{- end }}
+        {{- range .Values.extraValkeyConfigs }}
+        - name: extra-config-{{ .name }}
+          configMap:
+            name: {{ .name }}
+        {{- end }}
         {{- if eq .Values.image.variant "hardened" }}
         - name: tmp
           emptyDir:
@@ -399,5 +430,11 @@ spec:
             medium: Memory
         {{- end }}
         - name: data
+          {{- if .Values.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.persistence.hostPath }}
+            type: DirectoryOrCreate
+          {{- else }}
           emptyDir: {}
+          {{- end }}
 {{- end }}

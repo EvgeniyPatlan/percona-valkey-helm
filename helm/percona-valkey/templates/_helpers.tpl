@@ -355,6 +355,9 @@ Validate values and fail with collected errors.
 {{- if and .Values.standalone.useDeployment .Values.persistence.enabled -}}
   {{- $errors = append $errors "standalone.useDeployment requires persistence.enabled=false" -}}
 {{- end -}}
+{{- if and .Values.persistence.enabled .Values.persistence.hostPath -}}
+  {{- $errors = append $errors "persistence.hostPath is mutually exclusive with persistence.enabled=true — disable PVC to use hostPath" -}}
+{{- end -}}
 {{- /* ACL per-user validations */ -}}
 {{- if .Values.acl.enabled -}}
 {{- range $user, $cfg := .Values.acl.users -}}
@@ -365,6 +368,16 @@ Validate values and fail with collected errors.
   {{- $errors = append $errors (printf "acl.users.%s: cannot set both password and existingPasswordSecret" $user) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- if and .Values.acl.enabled .Values.acl.replicationUser -}}
+  {{- if not (hasKey .Values.acl.users .Values.acl.replicationUser) -}}
+    {{- $errors = append $errors (printf "acl.replicationUser '%s' must be defined in acl.users" .Values.acl.replicationUser) -}}
+  {{- else -}}
+    {{- $replUser := index .Values.acl.users .Values.acl.replicationUser -}}
+    {{- if and (not $replUser.password) (not $replUser.existingPasswordSecret) -}}
+      {{- $errors = append $errors (printf "acl.replicationUser '%s' must have a password or existingPasswordSecret" .Values.acl.replicationUser) -}}
+    {{- end -}}
+  {{- end -}}
 {{- end -}}
 {{- if $errors -}}
   {{- fail (printf "\n\npercona-valkey configuration errors:\n\n%s\n" (join "\n" $errors)) -}}

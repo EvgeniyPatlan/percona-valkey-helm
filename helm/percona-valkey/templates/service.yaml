@@ -28,11 +28,20 @@ spec:
   {{- else }}
   type: {{ .Values.service.type }}
   {{- end }}
+  {{- if .Values.service.clusterIP }}
+  clusterIP: {{ .Values.service.clusterIP }}
+  {{- end }}
+  {{- if .Values.service.loadBalancerClass }}
+  loadBalancerClass: {{ .Values.service.loadBalancerClass }}
+  {{- end }}
   ports:
     - name: valkey
       port: {{ .Values.service.port }}
       targetPort: valkey
       protocol: TCP
+      {{- if .Values.service.appProtocol }}
+      appProtocol: {{ .Values.service.appProtocol }}
+      {{- end }}
       {{- if and $isStandaloneExternal (eq .Values.externalAccess.service.type "NodePort") }}
       {{- if .Values.externalAccess.standalone.nodePort }}
       nodePort: {{ .Values.externalAccess.standalone.nodePort }}
@@ -43,6 +52,9 @@ spec:
       port: {{ .Values.tls.port }}
       targetPort: valkey-tls
       protocol: TCP
+      {{- if .Values.service.appProtocol }}
+      appProtocol: {{ .Values.service.appProtocol }}
+      {{- end }}
       {{- if and $isStandaloneExternal (eq .Values.externalAccess.service.type "NodePort") }}
       {{- if .Values.externalAccess.standalone.tlsNodePort }}
       nodePort: {{ .Values.externalAccess.standalone.tlsNodePort }}

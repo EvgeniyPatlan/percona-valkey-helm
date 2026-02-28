@@ -59,6 +59,9 @@ acl:
   ## Existing Secret containing a "users.acl" key with ACL rules.
   ## When set, acl.users is ignored.
   existingSecret: ""
+  ## ACL user for replication authentication (masteruser).
+  ## Must be defined in acl.users with a password. Empty = use default user.
+  replicationUser: ""
   ## Structured ACL user definitions. Keys are usernames.
   ## The default user is auto-managed — do not define it here.
   users: {}
@@ -215,6 +218,12 @@ service:
   type: ClusterIP
   port: 6379
   annotations: {}
+  ## Set a specific cluster IP (empty = auto-assign)
+  clusterIP: ""
+  ## LoadBalancer class (Kubernetes 1.24+, only when type=LoadBalancer)
+  loadBalancerClass: ""
+  ## Application protocol for service ports (e.g. "redis")
+  appProtocol: ""
 
 ## @section Persistence
 persistence:
@@ -224,6 +233,13 @@ persistence:
     - ReadWriteOnce
   size: 8Gi
   annotations: {}
+  ## Keep PVCs when Helm release is uninstalled (adds helm.sh/resource-policy: keep)
+  keepOnUninstall: false
+  ## Mount a sub-directory within the PVC instead of the volume root
+  subPath: ""
+  ## Use a hostPath volume instead of PVC (only when persistence.enabled=false).
+  ## Value is the absolute path on the host node.
+  hostPath: ""
 
 ## @section Health probes
 livenessProbe:
@@ -338,6 +354,10 @@ metrics:
     pullPolicy: IfNotPresent
   port: 9121
   resources: {}
+  ## Override the exporter container command
+  command: []
+  ## Override the exporter container args
+  args: []
   serviceMonitor:
     enabled: false
     namespace: ""
@@ -399,6 +419,14 @@ extraContainers: []
 extraVolumes: []
 ## Additional volume mounts for the valkey container
 extraVolumeMounts: []
+## Convenience: mount Secrets into the valkey container (auto-creates volume + volumeMount).
+extraValkeySecrets: []
+  # - name: my-secret
+  #   mountPath: /etc/valkey/extra-secrets/my-secret
+## Convenience: mount ConfigMaps into the valkey container.
+extraValkeyConfigs: []
+  # - name: my-configmap
+  #   mountPath: /etc/valkey/extra-configs/my-configmap
 ## Simple key-value environment variables for the valkey container.
 ## For complex env vars (valueFrom, configMapKeyRef), use extraEnvVars.
 env: {}
