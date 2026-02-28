@@ -309,6 +309,13 @@ Returns "true" if any ACL user has existingPasswordSecret (needs init container)
 {{- end }}
 
 {{/*
+Returns "true" if standalone Deployment mode is active.
+*/}}
+{{- define "percona-valkey.useDeployment" -}}
+{{- if and (eq .Values.mode "standalone") .Values.standalone.useDeployment -}}true{{- end -}}
+{{- end }}
+
+{{/*
 Render ACL lines for users with inline password (skip users with existingPasswordSecret).
 */}}
 {{- define "percona-valkey.aclInlineUsers" -}}
@@ -341,6 +348,12 @@ Validate values and fail with collected errors.
 {{- end -}}
 {{- if and .Values.tls.disablePlaintext (not .Values.tls.enabled) -}}
   {{- $errors = append $errors "tls.disablePlaintext requires tls.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.standalone.useDeployment (ne .Values.mode "standalone") -}}
+  {{- $errors = append $errors "standalone.useDeployment requires mode=standalone" -}}
+{{- end -}}
+{{- if and .Values.standalone.useDeployment .Values.persistence.enabled -}}
+  {{- $errors = append $errors "standalone.useDeployment requires persistence.enabled=false" -}}
 {{- end -}}
 {{- /* ACL per-user validations */ -}}
 {{- if .Values.acl.enabled -}}

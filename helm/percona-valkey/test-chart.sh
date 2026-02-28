@@ -178,6 +178,18 @@ test_lint() {
     else
         fail "lint clusterDomain"
     fi
+
+    if helm lint "$CHART_DIR" --set config.logLevel=verbose --set config.disklessSync=true > /dev/null 2>&1; then
+        pass "lint logLevel + disklessSync"
+    else
+        fail "lint logLevel + disklessSync"
+    fi
+
+    if helm lint "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false > /dev/null 2>&1; then
+        pass "lint deployment mode"
+    else
+        fail "lint deployment mode"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2847,6 +2859,142 @@ test_template_render() {
         pass "template env map + extraEnvVars coexist"
     else
         fail "template env map + extraEnvVars coexist"
+    fi
+
+    # --- logLevel (Feature 8) ---
+
+    # logLevel renders in configmap
+    out=$(helm template test "$CHART_DIR" --set config.logLevel=verbose --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "loglevel verbose"; then
+        pass "template logLevel renders in configmap"
+    else
+        fail "template logLevel renders in configmap"
+    fi
+
+    # logLevel absent by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "loglevel"; then
+        pass "template logLevel absent by default"
+    else
+        fail "template logLevel absent by default"
+    fi
+
+    # --- DH parameters for TLS (Feature 9) ---
+
+    # DH params config directive
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.dhParamsSecret=my-dh --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "tls-dh-params-file"; then
+        pass "template DH params config directive"
+    else
+        fail "template DH params config directive"
+    fi
+
+    # DH params volume mount in statefulset
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.dhParamsSecret=my-dh --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "tls-dhparams" && echo "$out" | grep -q "dhparams.pem"; then
+        pass "template DH params volume mount"
+    else
+        fail "template DH params volume mount"
+    fi
+
+    # DH params absent by default
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "dhparams"; then
+        pass "template DH params absent by default"
+    else
+        fail "template DH params absent by default"
+    fi
+
+    # --- disklessSync (Feature 10) ---
+
+    # disklessSync renders in configmap
+    out=$(helm template test "$CHART_DIR" --set config.disklessSync=true --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "repl-diskless-sync yes"; then
+        pass "template disklessSync renders in configmap"
+    else
+        fail "template disklessSync renders in configmap"
+    fi
+
+    # disklessSync absent by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "repl-diskless-sync"; then
+        pass "template disklessSync absent by default"
+    else
+        fail "template disklessSync absent by default"
+    fi
+
+    # --- min-replicas-to-write / min-replicas-max-lag (Feature 11) ---
+
+    # minReplicas renders in configmap
+    out=$(helm template test "$CHART_DIR" --set config.minReplicasToWrite=2 --set config.minReplicasMaxLag=5 --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "min-replicas-to-write 2" && echo "$out" | grep -q "min-replicas-max-lag 5"; then
+        pass "template minReplicas write quorum renders in configmap"
+    else
+        fail "template minReplicas write quorum renders in configmap"
+    fi
+
+    # minReplicas absent when 0
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "min-replicas-to-write"; then
+        pass "template minReplicas absent by default (0)"
+    else
+        fail "template minReplicas absent by default (0)"
+    fi
+
+    # --- Standalone Deployment (Feature 12) ---
+
+    # Deployment rendered when useDeployment=true
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Deployment"; then
+        pass "template standalone Deployment rendered"
+    else
+        fail "template standalone Deployment rendered"
+    fi
+
+    # Deployment has strategy
+    if echo "$out" | grep -q "strategy"; then
+        pass "template Deployment has strategy"
+    else
+        fail "template Deployment has strategy"
+    fi
+
+    # StatefulSet NOT rendered in deployment mode
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false --show-only templates/statefulset.yaml 2>&1 || true)
+    if echo "$out" | grep -q "could not find template"; then
+        pass "template StatefulSet skipped in deployment mode"
+    else
+        fail "template StatefulSet skipped in deployment mode"
+    fi
+
+    # Deployment NOT rendered by default
+    out=$(helm template test "$CHART_DIR" 2>&1)
+    if ! echo "$out" | grep -q "kind: Deployment"; then
+        pass "template Deployment NOT rendered by default"
+    else
+        fail "template Deployment NOT rendered by default"
+    fi
+
+    # Validation: useDeployment + persistence → error
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true 2>&1 || true)
+    if echo "$out" | grep -q "standalone.useDeployment requires persistence.enabled=false"; then
+        pass "validation: useDeployment + persistence fails"
+    else
+        fail "validation: useDeployment + persistence fails"
+    fi
+
+    # Validation: useDeployment + non-standalone → error
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false --set mode=cluster 2>&1 || true)
+    if echo "$out" | grep -q "standalone.useDeployment requires mode=standalone"; then
+        pass "validation: useDeployment + cluster mode fails"
+    else
+        fail "validation: useDeployment + cluster mode fails"
+    fi
+
+    # Deployment mode lint passes
+    if helm lint "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false > /dev/null 2>&1; then
+        pass "lint deployment mode"
+    else
+        fail "lint deployment mode"
     fi
 
     # --- Schema validation tests ---

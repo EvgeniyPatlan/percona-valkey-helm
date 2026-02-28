@@ -161,6 +161,9 @@
         "disablePlaintext": {
           "type": "boolean"
         },
+        "dhParamsSecret": {
+          "type": "string"
+        },
         "ciphers": {
           "type": "string"
         },
@@ -218,6 +221,19 @@
         "bind": {
           "type": "string"
         },
+        "logLevel": {
+          "type": "string",
+          "enum": ["", "debug", "verbose", "notice", "warning"]
+        },
+        "disklessSync": {
+          "type": "boolean"
+        },
+        "minReplicasToWrite": {
+          "type": "integer"
+        },
+        "minReplicasMaxLag": {
+          "type": "integer"
+        },
         "extraFlags": {
           "type": "string"
         },
@@ -253,6 +269,12 @@
       "properties": {
         "replicas": {
           "type": "integer"
+        },
+        "useDeployment": {
+          "type": "boolean"
+        },
+        "strategy": {
+          "type": "object"
         }
       },
       "additionalProperties": false

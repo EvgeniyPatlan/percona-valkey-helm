@@ -1,3 +1,4 @@
+{{- if not (include "percona-valkey.useDeployment" .) }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -531,6 +532,12 @@ spec:
               mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
             {{- end }}
+            {{- if and .Values.tls.enabled .Values.tls.dhParamsSecret }}
+            - name: tls-dhparams
+              mountPath: {{ .Values.tls.certMountPath }}/dhparams.pem
+              subPath: dhparams.pem
+              readOnly: true
+            {{- end }}
             {{- if and .Values.acl.enabled (not .Values.acl.existingSecret) }}
             {{- if (include "percona-valkey.aclNeedsInitContainer" .) }}
             - name: acl-assembled
@@ -700,6 +707,14 @@ spec:
               - key: ca.crt
                 path: ca.crt
         {{- end }}
+        {{- if and .Values.tls.enabled .Values.tls.dhParamsSecret }}
+        - name: tls-dhparams
+          secret:
+            secretName: {{ .Values.tls.dhParamsSecret }}
+            items:
+              - key: dhparams.pem
+                path: dhparams.pem
+        {{- end }}
         {{- if .Values.acl.enabled }}
         {{- if .Values.acl.existingSecret }}
         - name: acl-config
@@ -774,3 +789,4 @@ spec:
           requests:
             storage: {{ .Values.persistence.size }}
   {{- end }}
+{{- end }}

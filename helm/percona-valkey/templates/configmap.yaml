@@ -20,6 +20,16 @@ data:
     {{- if .Values.config.maxmemoryPolicy }}
     maxmemory-policy {{ .Values.config.maxmemoryPolicy }}
     {{- end }}
+    {{- if .Values.config.logLevel }}
+    loglevel {{ .Values.config.logLevel }}
+    {{- end }}
+    {{- if .Values.config.disklessSync }}
+    repl-diskless-sync yes
+    {{- end }}
+    {{- if gt (int .Values.config.minReplicasToWrite) 0 }}
+    min-replicas-to-write {{ .Values.config.minReplicasToWrite }}
+    min-replicas-max-lag {{ .Values.config.minReplicasMaxLag }}
+    {{- end }}
     # RDB persistence
     save 3600 1 300 100 60 10000
     dbfilename dump.rdb
@@ -44,6 +54,9 @@ data:
     {{- end }}
     {{- if .Values.tls.ciphersuites }}
     tls-ciphersuites {{ .Values.tls.ciphersuites }}
+    {{- end }}
+    {{- if .Values.tls.dhParamsSecret }}
+    tls-dh-params-file {{ .Values.tls.certMountPath }}/dhparams.pem
     {{- end }}
     {{- end }}
     {{- if eq .Values.mode "cluster" }}

@@ -86,6 +86,9 @@ tls:
   authClients: "no"
   ## Disable the non-TLS port entirely (set valkey port to 0)
   disablePlaintext: false
+  ## Existing Secret containing DH parameters file (key: dhparams.pem)
+  ## for enhanced Diffie-Hellman key exchange security
+  dhParamsSecret: ""
   ## Optional cipher suites (TLS 1.2)
   ciphers: ""
   ## Optional cipher suites (TLS 1.3)
@@ -110,6 +113,15 @@ config:
   maxmemory: ""
   maxmemoryPolicy: ""
   bind: "0.0.0.0"
+  ## Log level: debug, verbose, notice, warning
+  logLevel: ""
+  ## Enable diskless replication sync (useful when disk I/O is a bottleneck)
+  disklessSync: false
+  ## Write quorum: minimum number of replicas that must be connected
+  ## for the primary to accept writes. 0 = disabled (default).
+  minReplicasToWrite: 0
+  ## Maximum replication lag (seconds) for a replica to count toward the write quorum.
+  minReplicasMaxLag: 10
   ## Additional flags passed via VALKEY_EXTRA_FLAGS env var
   extraFlags: ""
   ## Custom valkey.conf content appended to generated config
@@ -128,6 +140,12 @@ cluster:
 ## @section Standalone mode settings
 standalone:
   replicas: 1
+  ## Use a Deployment instead of StatefulSet (cache-only, no persistence needed).
+  ## Requires mode=standalone and persistence.enabled=false.
+  useDeployment: false
+  ## Deployment strategy (only used when useDeployment=true)
+  strategy:
+    type: RollingUpdate
 
 ## @section Sentinel mode settings
 ## Master-replica topology monitored by Sentinel for automatic failover.
