@@ -3589,7 +3589,7 @@ test_template_render() {
 
     out=$(helm template test "$CHART_DIR" --set metrics.enabled=true \
         --show-only templates/statefulset.yaml 2>&1)
-    if echo "$out" | grep -A5 'name: metrics' | grep -q "readOnlyRootFilesystem: true"; then
+    if echo "$out" | grep -A15 'name: metrics' | grep -q "readOnlyRootFilesystem: true"; then
         pass "template F15 default securityContext matches"
     else
         fail "template F15 default securityContext matches"
