@@ -111,16 +111,24 @@ test_lint() {
         fail "lint cluster/hardened"
     fi
 
-    if helm lint "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
+    if helm lint "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.appuser.permissions=~* +@all' --set 'acl.users.appuser.password=apppass' > /dev/null 2>&1; then
         pass "lint standalone/acl"
     else
         fail "lint standalone/acl"
     fi
 
-    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
+    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.appuser.permissions=~* +@all' --set 'acl.users.appuser.password=apppass' > /dev/null 2>&1; then
         pass "lint cluster/acl"
     else
         fail "lint cluster/acl"
+    fi
+
+    if helm lint "$CHART_DIR" --set env.TZ=UTC > /dev/null 2>&1; then
+        pass "lint env map"
+    else
+        fail "lint env map"
     fi
 
     if helm lint "$CHART_DIR" --set auth.passwordRotation.enabled=true --set auth.password=$PASS > /dev/null 2>&1; then
@@ -2080,83 +2088,126 @@ test_template_render() {
 
     # --- ACL tests ---
 
-    # ACL disabled by default (no aclfile in configmap)
+    # ACL disabled: no aclfile in configmap
     out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
     if ! echo "$out" | grep -q "aclfile"; then
-        pass "template ACL disabled by default (no aclfile)"
+        pass "template ACL disabled: no aclfile in configmap"
     else
-        fail "template ACL disabled by default (no aclfile)"
+        fail "template ACL disabled: no aclfile in configmap"
     fi
 
     # ACL enabled: aclfile present in configmap
     out=$(helm template test "$CHART_DIR" --set acl.enabled=true --show-only templates/configmap.yaml 2>&1)
     if echo "$out" | grep -q "aclfile /etc/valkey/acl/users.acl"; then
-        pass "template ACL enabled: aclfile in configmap"
+        pass "template ACL enabled: aclfile present"
     else
-        fail "template ACL enabled: aclfile in configmap"
+        fail "template ACL enabled: aclfile present"
     fi
 
-    # ACL enabled with inline users: users.acl key in Secret
-    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS --set acl.enabled=true --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/secret.yaml 2>&1)
-    if echo "$out" | grep -q "users.acl:"; then
-        pass "template ACL enabled: users.acl key in Secret"
+    # ACL inline user: users.acl key in Secret
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set 'acl.users.appuser.permissions=~* +@all' \
+        --set 'acl.users.appuser.password=apppass' \
+        --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "users.acl"; then
+        pass "template ACL inline user: users.acl in Secret"
     else
-        fail "template ACL enabled: users.acl key in Secret"
+        fail "template ACL inline user: users.acl in Secret"
     fi
 
-    # ACL enabled: volume mount present in statefulset
-    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --show-only templates/statefulset.yaml 2>&1)
-    if echo "$out" | grep -q "name: acl-config" && echo "$out" | grep -q "mountPath: /etc/valkey/acl"; then
-        pass "template ACL enabled: volume mount in statefulset"
+    # ACL inline user: direct secret mount, NO init container
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set 'acl.users.appuser.permissions=~* +@all' \
+        --set 'acl.users.appuser.password=apppass' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "acl-config" && ! echo "$out" | grep -q "acl-init"; then
+        pass "template ACL inline user: direct mount, no init container"
     else
-        fail "template ACL enabled: volume mount in statefulset"
+        fail "template ACL inline user: direct mount, no init container"
     fi
 
-    # ACL enabled: acl-config volume present in statefulset
-    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=$PASS --set acl.enabled=true --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/statefulset.yaml 2>&1)
-    if echo "$out" | grep -q "name: acl-config"; then
-        pass "template ACL enabled: acl-config volume in statefulset"
+    # ACL existingPasswordSecret: acl-init container present
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set 'acl.users.monitor.permissions=+info +ping' \
+        --set 'acl.users.monitor.existingPasswordSecret=mon-creds' \
+        --set 'acl.users.monitor.passwordKey=password' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "acl-init"; then
+        pass "template ACL existingPasswordSecret: acl-init container present"
     else
-        fail "template ACL enabled: acl-config volume in statefulset"
+        fail "template ACL existingPasswordSecret: acl-init container present"
     fi
 
-    # ACL with existingSecret: uses external secret name
-    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set acl.existingSecret=my-acl-secret --show-only templates/statefulset.yaml 2>&1)
-    if echo "$out" | grep -q "my-acl-secret"; then
-        pass "template ACL existingSecret: uses external secret name"
+    # ACL existingPasswordSecret: acl-assembled + acl-base volumes
+    if echo "$out" | grep -q "acl-assembled" && echo "$out" | grep -q "acl-base"; then
+        pass "template ACL existingPasswordSecret: acl-assembled + acl-base volumes"
     else
-        fail "template ACL existingSecret: uses external secret name"
+        fail "template ACL existingPasswordSecret: acl-assembled + acl-base volumes"
     fi
 
-    # ACL with existingSecret: no users.acl key in chart Secret
-    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS --set acl.enabled=true --set acl.existingSecret=my-acl-secret --set 'acl.users=user app on >apppass ~* +@all' --show-only templates/secret.yaml 2>&1)
-    if ! echo "$out" | grep -q "users.acl:"; then
-        pass "template ACL existingSecret: no users.acl in chart Secret"
+    # ACL existingPasswordSecret: external secret volume mounted
+    if echo "$out" | grep -q "acl-secret-monitor"; then
+        pass "template ACL existingPasswordSecret: external secret volume"
     else
-        fail "template ACL existingSecret: no users.acl in chart Secret"
+        fail "template ACL existingPasswordSecret: external secret volume"
     fi
 
-    # ACL disabled: no volume mount in statefulset
+    # ACL existingSecret: uses external name, ignores users
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set acl.existingSecret=my-acl-secret \
+        --set 'acl.users.appuser.permissions=~* +@all' \
+        --set 'acl.users.appuser.password=x' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "my-acl-secret" && ! echo "$out" | grep -q "acl-init"; then
+        pass "template ACL existingSecret: uses external name"
+    else
+        fail "template ACL existingSecret: uses external name"
+    fi
+
+    # ACL disabled: no acl resources
     out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
-    if ! echo "$out" | grep -q "acl-config"; then
-        pass "template ACL disabled: no acl-config in statefulset"
+    if ! echo "$out" | grep -q "acl-config" && ! echo "$out" | grep -q "acl-init"; then
+        pass "template ACL disabled: no acl resources"
     else
-        fail "template ACL disabled: no acl-config in statefulset"
+        fail "template ACL disabled: no acl resources"
     fi
 
-    # ACL + cluster mode: lint passes
-    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true --set auth.password=$PASS --set 'acl.users=user app on >apppass ~* +@all' > /dev/null 2>&1; then
-        pass "template ACL + cluster mode lint"
+    # ACL + cluster lint
+    if helm lint "$CHART_DIR" --set mode=cluster --set acl.enabled=true \
+        --set 'acl.users.app.permissions=~* +@all' --set 'acl.users.app.password=x' > /dev/null 2>&1; then
+        pass "template ACL + cluster lint"
     else
-        fail "template ACL + cluster mode lint"
+        fail "template ACL + cluster lint"
     fi
 
-    # ACL + external access: --masterauth without --requirepass
+    # ACL + external access: masterauth without requirepass
     out=$(helm template test "$CHART_DIR" --set mode=cluster --set externalAccess.enabled=true --set acl.enabled=true --show-only templates/statefulset.yaml 2>&1)
     if echo "$out" | grep -q "\-\-masterauth" && ! echo "$out" | grep -q "\-\-requirepass"; then
         pass "template ACL + external access: masterauth without requirepass"
     else
         fail "template ACL + external access: masterauth without requirepass"
+    fi
+
+    # Validation: missing passwordKey → error
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set 'acl.users.bad.existingPasswordSecret=some-secret' \
+        --set 'acl.users.bad.permissions=+ping' 2>&1 || true)
+    if echo "$out" | grep -q "existingPasswordSecret requires passwordKey"; then
+        pass "validation: ACL missing passwordKey fails"
+    else
+        fail "validation: ACL missing passwordKey fails"
+    fi
+
+    # Validation: both password + existingPasswordSecret → error
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true \
+        --set 'acl.users.dup.password=x' \
+        --set 'acl.users.dup.existingPasswordSecret=y' \
+        --set 'acl.users.dup.passwordKey=pw' \
+        --set 'acl.users.dup.permissions=+ping' 2>&1 || true)
+    if echo "$out" | grep -q "cannot set both password and existingPasswordSecret"; then
+        pass "validation: ACL both password + existingPasswordSecret fails"
+    else
+        fail "validation: ACL both password + existingPasswordSecret fails"
     fi
 
     # --- Feature #16: Scale-down precheck ---
@@ -2690,6 +2741,112 @@ test_template_render() {
         pass "template custom clusterDomain in backup-cronjob"
     else
         fail "template custom clusterDomain in backup-cronjob"
+    fi
+
+    # --- Validation helpers ---
+
+    # ACL without auth → fails
+    out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.enabled=false 2>&1 || true)
+    if echo "$out" | grep -q "acl.enabled requires auth"; then
+        pass "validation: ACL without auth fails"
+    else
+        fail "validation: ACL without auth fails"
+    fi
+
+    # Sentinel + externalAccess → fails
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set externalAccess.enabled=true 2>&1 || true)
+    if echo "$out" | grep -q "externalAccess is not supported in sentinel mode"; then
+        pass "validation: sentinel + externalAccess fails"
+    else
+        fail "validation: sentinel + externalAccess fails"
+    fi
+
+    # passwordRotation without auth → fails
+    out=$(helm template test "$CHART_DIR" --set auth.passwordRotation.enabled=true --set auth.enabled=false 2>&1 || true)
+    if echo "$out" | grep -q "auth.passwordRotation requires auth.enabled=true"; then
+        pass "validation: passwordRotation without auth fails"
+    else
+        fail "validation: passwordRotation without auth fails"
+    fi
+
+    # Cluster without persistence → fails
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set persistence.enabled=false 2>&1 || true)
+    if echo "$out" | grep -q "persistence.enabled=false with mode="; then
+        pass "validation: cluster without persistence fails"
+    else
+        fail "validation: cluster without persistence fails"
+    fi
+
+    # Sentinel without persistence → fails
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set persistence.enabled=false 2>&1 || true)
+    if echo "$out" | grep -q "persistence.enabled=false with mode="; then
+        pass "validation: sentinel without persistence fails"
+    else
+        fail "validation: sentinel without persistence fails"
+    fi
+
+    # Cluster replicas < 6 → fails
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --set cluster.replicas=3 2>&1 || true)
+    if echo "$out" | grep -q "cluster.replicas must be >= 6"; then
+        pass "validation: cluster replicas < 6 fails"
+    else
+        fail "validation: cluster replicas < 6 fails"
+    fi
+
+    # TLS disablePlaintext without TLS → fails
+    out=$(helm template test "$CHART_DIR" --set tls.disablePlaintext=true --set tls.enabled=false 2>&1 || true)
+    if echo "$out" | grep -q "tls.disablePlaintext requires tls.enabled=true"; then
+        pass "validation: TLS disablePlaintext without TLS fails"
+    else
+        fail "validation: TLS disablePlaintext without TLS fails"
+    fi
+
+    # Valid cluster config → renders OK
+    if helm template test "$CHART_DIR" --set mode=cluster --set cluster.replicas=6 > /dev/null 2>&1; then
+        pass "validation: valid cluster config renders OK"
+    else
+        fail "validation: valid cluster config renders OK"
+    fi
+
+    # Standalone without persistence → allowed (does NOT fail)
+    if helm template test "$CHART_DIR" --set mode=standalone --set persistence.enabled=false > /dev/null 2>&1; then
+        pass "validation: standalone without persistence is allowed"
+    else
+        fail "validation: standalone without persistence is allowed"
+    fi
+
+    # --- env map tests ---
+
+    # env map renders in statefulset
+    out=$(helm template test "$CHART_DIR" --set env.TZ=UTC --set env.MY_VAR=hello --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: TZ" && echo "$out" | grep -q '"UTC"'; then
+        pass "template env map renders in statefulset"
+    else
+        fail "template env map renders in statefulset"
+    fi
+
+    # env map empty by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "name: TZ"; then
+        pass "template env map empty by default"
+    else
+        fail "template env map empty by default"
+    fi
+
+    # env map NOT in sentinel-statefulset
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel --set env.TZ=UTC --show-only templates/sentinel-statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "name: TZ"; then
+        pass "template env map NOT in sentinel-statefulset"
+    else
+        fail "template env map NOT in sentinel-statefulset"
+    fi
+
+    # env map + extraEnvVars coexist
+    out=$(helm template test "$CHART_DIR" --set env.TZ=UTC --set 'extraEnvVars[0].name=EXTRA' --set 'extraEnvVars[0].value=val' --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "name: TZ" && echo "$out" | grep -q "name: EXTRA"; then
+        pass "template env map + extraEnvVars coexist"
+    else
+        fail "template env map + extraEnvVars coexist"
     fi
 
     # --- Schema validation tests ---
@@ -4622,7 +4779,8 @@ test_acl_standalone() {
     helm install "$rel" "$CHART_DIR" \
         --set auth.password=$PASS \
         --set acl.enabled=true \
-        --set 'acl.users=user app on >apppass123 ~* &* +@all' \
+        --set 'acl.users.app.permissions=~* &* +@all' \
+        --set 'acl.users.app.password=apppass123' \
         -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "acl standalone install"; cleanup "$rel"; return; }
     pass "acl standalone install"
 

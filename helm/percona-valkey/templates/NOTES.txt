@@ -116,11 +116,20 @@ The default user authenticates with the password from auth.password / auth.exist
 {{- if .Values.acl.existingSecret }}
 ACL rules are loaded from existing Secret: {{ .Values.acl.existingSecret }} (key: users.acl)
 {{- else if .Values.acl.users }}
-ACL rules are rendered from acl.users into the chart Secret (key: users.acl)
+ACL rules are rendered from acl.users ({{ len .Values.acl.users }} user(s) defined).
+{{- if include "percona-valkey.aclNeedsInitContainer" . }}
+An init container assembles the ACL file from external password Secrets.
+{{- end }}
 {{- end }}
 
 To connect as a custom ACL user:
   valkey-cli -h <host> -p {{ .Values.service.port }} --user <username> --pass <password>
+{{- end }}
+
+{{- if and .Values.backup.enabled (eq .Values.mode "cluster") }}
+
+WARNING: Backup in cluster mode captures data from a single shard (pod {{ .Values.backup.sourceOrdinal }}) only.
+For full cluster backup, run CLUSTER SAVECONFIG on each shard or use an external backup tool.
 {{- end }}
 
 {{- if .Values.backup.enabled }}

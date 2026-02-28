@@ -296,3 +296,64 @@ Returns "true" (string) if both conditions met, empty string otherwise.
 {{- define "percona-valkey.externalAccessStandalone" -}}
 {{- if and (include "percona-valkey.externalAccessEnabled" .) (eq .Values.mode "standalone") }}true{{- end }}
 {{- end }}
+
+{{/*
+Returns "true" if any ACL user has existingPasswordSecret (needs init container).
+*/}}
+{{- define "percona-valkey.aclNeedsInitContainer" -}}
+{{- if .Values.acl.enabled -}}
+{{- range $user, $cfg := .Values.acl.users -}}
+{{- if $cfg.existingPasswordSecret -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Render ACL lines for users with inline password (skip users with existingPasswordSecret).
+*/}}
+{{- define "percona-valkey.aclInlineUsers" -}}
+{{- range $user, $cfg := .Values.acl.users -}}
+{{- if and (not $cfg.existingPasswordSecret) $cfg.password }}
+user {{ $user }} on >{{ $cfg.password }} {{ $cfg.permissions | default "~* &* +@all" }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validate values and fail with collected errors.
+*/}}
+{{- define "percona-valkey.validateValues" -}}
+{{- $errors := list -}}
+{{- if and .Values.acl.enabled (not .Values.auth.enabled) -}}
+  {{- $errors = append $errors "acl.enabled requires auth.enabled=true" -}}
+{{- end -}}
+{{- if and (eq .Values.mode "sentinel") (include "percona-valkey.externalAccessEnabled" .) -}}
+  {{- $errors = append $errors "externalAccess is not supported in sentinel mode" -}}
+{{- end -}}
+{{- if and .Values.auth.passwordRotation.enabled (not .Values.auth.enabled) -}}
+  {{- $errors = append $errors "auth.passwordRotation requires auth.enabled=true" -}}
+{{- end -}}
+{{- if and (ne .Values.mode "standalone") (not .Values.persistence.enabled) -}}
+  {{- $errors = append $errors "persistence.enabled=false with mode=<cluster|sentinel> risks data loss" -}}
+{{- end -}}
+{{- if and (eq .Values.mode "cluster") (lt (int .Values.cluster.replicas) 6) -}}
+  {{- $errors = append $errors "cluster.replicas must be >= 6 (3 primaries + 3 replicas minimum)" -}}
+{{- end -}}
+{{- if and .Values.tls.disablePlaintext (not .Values.tls.enabled) -}}
+  {{- $errors = append $errors "tls.disablePlaintext requires tls.enabled=true" -}}
+{{- end -}}
+{{- /* ACL per-user validations */ -}}
+{{- if .Values.acl.enabled -}}
+{{- range $user, $cfg := .Values.acl.users -}}
+{{- if and $cfg.existingPasswordSecret (not $cfg.passwordKey) -}}
+  {{- $errors = append $errors (printf "acl.users.%s: existingPasswordSecret requires passwordKey" $user) -}}
+{{- end -}}
+{{- if and $cfg.password $cfg.existingPasswordSecret -}}
+  {{- $errors = append $errors (printf "acl.users.%s: cannot set both password and existingPasswordSecret" $user) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $errors -}}
+  {{- fail (printf "\n\npercona-valkey configuration errors:\n\n%s\n" (join "\n" $errors)) -}}
+{{- end -}}
+{{- end }}

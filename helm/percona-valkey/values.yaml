@@ -59,13 +59,16 @@ acl:
   ## Existing Secret containing a "users.acl" key with ACL rules.
   ## When set, acl.users is ignored.
   existingSecret: ""
-  ## Inline ACL rules. Rendered into a Secret and mounted as users.acl.
-  ## The default user line is auto-generated from auth.password if not included here.
-  ## Example:
-  ##   users: |
-  ##     user app on >apppass ~cache:* +@read +@write -@dangerous
-  ##     user monitor on >monpass +client +info +slowlog +latency +ping
-  users: ""
+  ## Structured ACL user definitions. Keys are usernames.
+  ## The default user is auto-managed — do not define it here.
+  users: {}
+  #   appuser:
+  #     permissions: "~app:* +get +set +del"
+  #     password: "secretpass"
+  #   monitor:
+  #     permissions: "+client +info +slowlog +latency +ping"
+  #     existingPasswordSecret: "monitor-creds"
+  #     passwordKey: "password"
 
 ## @section TLS/SSL configuration
 tls:
@@ -372,7 +375,12 @@ extraContainers: []
 extraVolumes: []
 ## Additional volume mounts for the valkey container
 extraVolumeMounts: []
-## Additional env vars for the valkey container
+## Simple key-value environment variables for the valkey container.
+## For complex env vars (valueFrom, configMapKeyRef), use extraEnvVars.
+env: {}
+  # TZ: "UTC"
+  # MY_CUSTOM_VAR: "value"
+## Additional env vars for the valkey container (full spec)
 extraEnvVars: []
 
 ## @section Resource presets

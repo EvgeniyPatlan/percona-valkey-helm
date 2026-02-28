@@ -82,7 +82,7 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled (include "percona-valkey.externalAccessCluster" .) .Values.extraInitContainers }}
+      {{- if or .Values.sysctlInit.enabled .Values.volumePermissions.enabled (include "percona-valkey.externalAccessCluster" .) (include "percona-valkey.aclNeedsInitContainer" .) .Values.extraInitContainers }}
       initContainers:
         {{- if .Values.sysctlInit.enabled }}
         - name: sysctl-init
@@ -189,6 +189,37 @@ spec:
           volumeMounts:
             - name: external-config
               mountPath: /external-config
+        {{- end }}
+        {{- if (include "percona-valkey.aclNeedsInitContainer" .) }}
+        - name: acl-init
+          image: {{ include "percona-valkey.rpmImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /acl-base/users.acl /acl-assembled/users.acl
+              {{- range $user, $cfg := .Values.acl.users }}
+              {{- if $cfg.existingPasswordSecret }}
+              PASS=$(cat /acl-secret-{{ $user }}/{{ $cfg.passwordKey }})
+              echo "user {{ $user }} on >$PASS {{ $cfg.permissions | default "~* &* +@all" }}" >> /acl-assembled/users.acl
+              {{- end }}
+              {{- end }}
+          volumeMounts:
+            - name: acl-base
+              mountPath: /acl-base
+              readOnly: true
+            - name: acl-assembled
+              mountPath: /acl-assembled
+            {{- range $user, $cfg := .Values.acl.users }}
+            {{- if $cfg.existingPasswordSecret }}
+            - name: acl-secret-{{ $user }}
+              mountPath: /acl-secret-{{ $user }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
         {{- end }}
         {{- with .Values.extraInitContainers }}
         {{- toYaml . | nindent 8 }}
@@ -302,6 +333,10 @@ spec:
             {{- else if .Values.config.extraFlags }}
             - name: VALKEY_EXTRA_FLAGS
               value: {{ .Values.config.extraFlags | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
             {{- end }}
             {{- with .Values.extraEnvVars }}
             {{- toYaml . | nindent 12 }}
@@ -496,7 +531,18 @@ spec:
               mountPath: {{ .Values.tls.certMountPath }}
               readOnly: true
             {{- end }}
-            {{- if .Values.acl.enabled }}
+            {{- if and .Values.acl.enabled (not .Values.acl.existingSecret) }}
+            {{- if (include "percona-valkey.aclNeedsInitContainer" .) }}
+            - name: acl-assembled
+              mountPath: /etc/valkey/acl
+              readOnly: true
+            {{- else }}
+            - name: acl-config
+              mountPath: /etc/valkey/acl
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.acl.enabled .Values.acl.existingSecret }}
             - name: acl-config
               mountPath: /etc/valkey/acl
               readOnly: true
@@ -655,12 +701,37 @@ spec:
                 path: ca.crt
         {{- end }}
         {{- if .Values.acl.enabled }}
+        {{- if .Values.acl.existingSecret }}
+        - name: acl-config
+          secret:
+            secretName: {{ .Values.acl.existingSecret }}
+        {{- else if (include "percona-valkey.aclNeedsInitContainer" .) }}
+        - name: acl-base
+          secret:
+            secretName: {{ include "percona-valkey.fullname" . }}
+            items:
+              - key: users.acl
+                path: users.acl
+        - name: acl-assembled
+          emptyDir: {}
+        {{- range $user, $cfg := .Values.acl.users }}
+        {{- if $cfg.existingPasswordSecret }}
+        - name: acl-secret-{{ $user }}
+          secret:
+            secretName: {{ $cfg.existingPasswordSecret }}
+            items:
+              - key: {{ $cfg.passwordKey }}
+                path: {{ $cfg.passwordKey }}
+        {{- end }}
+        {{- end }}
+        {{- else }}
         - name: acl-config
           secret:
             secretName: {{ include "percona-valkey.aclSecretName" . }}
             items:
               - key: users.acl
                 path: users.acl
+        {{- end }}
         {{- end }}
         {{- if include "percona-valkey.externalAccessCluster" . }}
         - name: external-config

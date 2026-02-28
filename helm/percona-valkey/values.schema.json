@@ -121,7 +121,17 @@
           "type": "string"
         },
         "users": {
-          "type": "string"
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "permissions": { "type": "string" },
+              "password": { "type": "string" },
+              "existingPasswordSecret": { "type": "string" },
+              "passwordKey": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -570,6 +580,11 @@
     },
     "extraVolumeMounts": {
       "type": "array"
+    },
+    "env": {
+      "type": "object",
+      "description": "Simple key-value environment variables.",
+      "additionalProperties": { "type": "string" }
     },
     "extraEnvVars": {
       "type": "array"
