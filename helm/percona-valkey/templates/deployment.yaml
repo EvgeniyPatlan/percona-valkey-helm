@@ -98,7 +98,7 @@ spec:
               echo never > /sys/kernel/mm/transparent_hugepage/enabled || true
               echo never > /sys/kernel/mm/transparent_hugepage/defrag || true
               {{- end }}
-          {{- with .Values.sysctlInit.resources }}
+          {{- with (.Values.sysctlInit.resources | default .Values.initResources) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

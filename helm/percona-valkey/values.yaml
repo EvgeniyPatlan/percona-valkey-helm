@@ -200,6 +200,8 @@ securityContext:
   runAsGroup: 999
   fsGroup: 999
   runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
 
 containerSecurityContext:
   readOnlyRootFilesystem: false
@@ -251,6 +253,10 @@ startupProbe:
 resources:
   limits: {}
   requests: {}
+
+## Resources for init containers (sysctl-init, volume-permissions, acl-init, discover-external-ip).
+## Per-init-container resources (sysctlInit.resources, volumePermissions.resources) override this.
+initResources: {}
 
 ## @section ServiceAccount
 serviceAccount:

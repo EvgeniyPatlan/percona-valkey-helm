@@ -321,7 +321,7 @@ Render ACL lines for users with inline password (skip users with existingPasswor
 {{- define "percona-valkey.aclInlineUsers" -}}
 {{- range $user, $cfg := .Values.acl.users -}}
 {{- if and (not $cfg.existingPasswordSecret) $cfg.password }}
-user {{ $user }} on >{{ $cfg.password }} {{ $cfg.permissions | default "~* &* +@all" }}
+user {{ $user }} on #{{ $cfg.password | sha256sum }} {{ $cfg.permissions | default "~* &* +@all" }}
 {{- end -}}
 {{- end -}}
 {{- end }}

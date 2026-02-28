@@ -190,6 +190,13 @@ test_lint() {
     else
         fail "lint deployment mode"
     fi
+
+    if helm lint "$CHART_DIR" --set initResources.requests.cpu=50m --set initResources.requests.memory=64Mi \
+        --set initResources.limits.cpu=100m --set initResources.limits.memory=128Mi > /dev/null 2>&1; then
+        pass "lint initResources"
+    else
+        fail "lint initResources"
+    fi
 }
 
 # --- Template Render Tests ---
@@ -2995,6 +3002,93 @@ test_template_render() {
         pass "lint deployment mode"
     else
         fail "lint deployment mode"
+    fi
+
+    # --- SHA256 password hashing ---
+
+    # ACL inline user passwords are SHA256-hashed (# prefix, not > prefix)
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.app.password=testpass' \
+        --set 'acl.users.app.permissions=~* &* +@all' \
+        --show-only templates/secret.yaml 2>&1)
+    local acl_b64=$(echo "$out" | grep 'users.acl:' | awk '{print $2}' | tr -d '"')
+    local acl_decoded=$(echo "$acl_b64" | base64 -d 2>/dev/null)
+    if echo "$acl_decoded" | grep -q '#' && ! echo "$acl_decoded" | grep -q '>'; then
+        pass "template ACL passwords are SHA256-hashed (# prefix, no > prefix)"
+    else
+        fail "template ACL passwords are SHA256-hashed (# prefix, no > prefix)"
+    fi
+
+    # ACL with existingPasswordSecret — acl-init script uses sha256sum
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.svcuser.existingPasswordSecret=my-secret' \
+        --set 'acl.users.svcuser.passwordKey=password' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'sha256sum' && echo "$out" | grep -q '#$HASH'; then
+        pass "template acl-init script uses sha256sum for existingPasswordSecret"
+    else
+        fail "template acl-init script uses sha256sum for existingPasswordSecret"
+    fi
+
+    # --- Seccomp profile ---
+
+    # Default render includes seccompProfile RuntimeDefault
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'seccompProfile' && echo "$out" | grep -q 'type: RuntimeDefault'; then
+        pass "template seccompProfile RuntimeDefault in pod security context"
+    else
+        fail "template seccompProfile RuntimeDefault in pod security context"
+    fi
+
+    # --- initResources ---
+
+    # initResources propagates to sysctl-init when sysctlInit.resources is not set
+    out=$(helm template test "$CHART_DIR" \
+        --set sysctlInit.enabled=true \
+        --set initResources.requests.cpu=50m \
+        --set initResources.requests.memory=64Mi \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -B20 'sysctl-init' | grep -q 'resources' || \
+       echo "$out" | sed -n '/sysctl-init/,/- name:/p' | grep -q 'cpu: 50m'; then
+        # More precise check: extract sysctl-init section and look for the resource
+        local sysctl_section=$(echo "$out" | sed -n '/name: sysctl-init/,/^        - name:/p')
+        if echo "$sysctl_section" | grep -q '50m'; then
+            pass "template initResources propagates to sysctl-init"
+        else
+            fail "template initResources propagates to sysctl-init"
+        fi
+    else
+        fail "template initResources propagates to sysctl-init"
+    fi
+
+    # sysctlInit.resources overrides initResources
+    out=$(helm template test "$CHART_DIR" \
+        --set sysctlInit.enabled=true \
+        --set initResources.requests.cpu=50m \
+        --set sysctlInit.resources.requests.cpu=200m \
+        --show-only templates/statefulset.yaml 2>&1)
+    local sysctl_section=$(echo "$out" | sed -n '/name: sysctl-init/,/^        - name:/p')
+    if echo "$sysctl_section" | grep -q '200m' && ! echo "$sysctl_section" | grep -q '50m'; then
+        pass "template sysctlInit.resources overrides initResources"
+    else
+        fail "template sysctlInit.resources overrides initResources"
+    fi
+
+    # initResources propagates to acl-init
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.svcuser.existingPasswordSecret=my-secret' \
+        --set 'acl.users.svcuser.passwordKey=password' \
+        --set initResources.requests.cpu=50m \
+        --set initResources.limits.memory=128Mi \
+        --show-only templates/statefulset.yaml 2>&1)
+    local acl_section=$(echo "$out" | sed -n '/name: acl-init/,/^      containers:/p')
+    if echo "$acl_section" | grep -q '50m' && echo "$acl_section" | grep -q '128Mi'; then
+        pass "template initResources propagates to acl-init"
+    else
+        fail "template initResources propagates to acl-init"
     fi
 
     # --- Schema validation tests ---

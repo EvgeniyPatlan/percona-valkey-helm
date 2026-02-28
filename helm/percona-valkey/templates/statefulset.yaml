@@ -103,7 +103,7 @@ spec:
               echo never > /sys/kernel/mm/transparent_hugepage/enabled || true
               echo never > /sys/kernel/mm/transparent_hugepage/defrag || true
               {{- end }}
-          {{- with .Values.sysctlInit.resources }}
+          {{- with (.Values.sysctlInit.resources | default .Values.initResources) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -122,7 +122,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-          {{- with .Values.volumePermissions.resources }}
+          {{- with (.Values.volumePermissions.resources | default .Values.initResources) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -187,6 +187,10 @@ spec:
               echo -n "$EXTERNAL_IP" > /external-config/external-ip
               echo -n "$EXTERNAL_PORT" > /external-config/external-port
               echo -n "$BUS_PORT" > /external-config/external-bus-port
+          {{- with .Values.initResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: external-config
               mountPath: /external-config
@@ -205,9 +209,14 @@ spec:
               {{- range $user, $cfg := .Values.acl.users }}
               {{- if $cfg.existingPasswordSecret }}
               PASS=$(cat /acl-secret-{{ $user }}/{{ $cfg.passwordKey }})
-              echo "user {{ $user }} on >$PASS {{ $cfg.permissions | default "~* &* +@all" }}" >> /acl-assembled/users.acl
+              HASH=$(echo -n "$PASS" | sha256sum | cut -d ' ' -f 1)
+              echo "user {{ $user }} on #$HASH {{ $cfg.permissions | default "~* &* +@all" }}" >> /acl-assembled/users.acl
               {{- end }}
               {{- end }}
+          {{- with .Values.initResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: acl-base
               mountPath: /acl-base
