@@ -305,16 +305,16 @@ test_lint() {
     fi
 
     # F19: default user in acl.users must fail
-    if helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
-        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1 | grep -q "default user is auto-managed"; then
+    if (helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1 || true) | grep -q "default user is auto-managed"; then
         pass "lint F19 default user protection"
     else
         fail "lint F19 default user protection"
     fi
 
     # F20: missing permissions must fail
-    if helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
-        --set 'acl.users.x.password=p' 2>&1 | grep -q "permissions field is required"; then
+    if (helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
+        --set 'acl.users.x.password=p' 2>&1 || true) | grep -q "permissions field is required"; then
         pass "lint F20 permissions required"
     else
         fail "lint F20 permissions required"
@@ -3644,7 +3644,7 @@ test_template_render() {
     # === F19: default user protection ===
 
     out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
-        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1)
+        --set 'acl.users.default.permissions=~* +@all' --set 'acl.users.default.password=p' 2>&1 || true)
     if echo "$out" | grep -q "default user is auto-managed"; then
         pass "template F19 validation error for default user"
     else
@@ -3654,7 +3654,7 @@ test_template_render() {
     # === F20: permissions required ===
 
     out=$(helm template test "$CHART_DIR" --set acl.enabled=true --set auth.password=p \
-        --set 'acl.users.x.password=p' 2>&1)
+        --set 'acl.users.x.password=p' 2>&1 || true)
     if echo "$out" | grep -q "permissions field is required"; then
         pass "template F20 validation error for missing permissions"
     else
