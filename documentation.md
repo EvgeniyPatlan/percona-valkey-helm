@@ -64,9 +64,9 @@ percona-valkey-helm/
     values.yaml                         # Default configuration values
     .helmignore                         # Files to ignore during packaging
     values.schema.json                  # JSON Schema for values validation
-    test-chart.sh                       # Comprehensive test suite (5000+ lines)
+    test-chart.sh                       # Comprehensive test suite (6300+ lines)
     templates/
-      _helpers.tpl                      # 25 named template helpers
+      _helpers.tpl                      # 27 named template helpers
       NOTES.txt                         # Post-install instructions
       # --- Core Resources ---
       statefulset.yaml                  # Main Valkey StatefulSet (standalone/cluster/sentinel data)
@@ -453,14 +453,40 @@ Users are defined as a structured map under `acl.users`. Each key is a username 
 
 | Property | Description |
 |----------|-------------|
-| `permissions` | ACL rule string (e.g., `~cache:* +@read +@write`). Defaults to `~* &* +@all` if omitted. |
+| `permissions` | ACL rule string (e.g., `~cache:* +@read +@write`). **Required** — validation fails if omitted. |
 | `password` | Inline password (stored in the chart-managed Secret) |
 | `existingPasswordSecret` | Name of an existing Secret containing the password (mutually exclusive with `password`) |
 | `passwordKey` | Key within the `existingPasswordSecret` (required when `existingPasswordSecret` is set) |
 
 **Validation rules:**
-- Cannot set both `password` and `existingPasswordSecret` on the same user
-- `existingPasswordSecret` requires `passwordKey` to be set
+- The `default` username is reserved — the chart auto-manages the default user via `auth.password`. Defining `default` in `acl.users` causes a validation error.
+- The `permissions` field is required for every user — omitting it causes a validation error.
+- Cannot set both `password` and `existingPasswordSecret` on the same user.
+- `existingPasswordSecret` requires `passwordKey` to be set.
+
+#### ACL Validation Flow
+
+```
+┌─────────────────────────────────────────────────────┐
+│               acl.users validation                  │
+│                                                     │
+│  1. Is "default" in acl.users?                      │
+│     YES → ERROR: default user is auto-managed       │
+│                                                     │
+│  For each user in acl.users:                        │
+│  2. Is permissions set?                             │
+│     NO  → ERROR: permissions field is required      │
+│  3. Both password AND existingPasswordSecret?       │
+│     YES → ERROR: cannot set both                    │
+│  4. existingPasswordSecret without passwordKey?     │
+│     YES → ERROR: passwordKey required               │
+│                                                     │
+│  5. replicationUser set but not in acl.users?       │
+│     YES → ERROR: must be defined in acl.users       │
+│  6. replicationUser has no password source?          │
+│     YES → ERROR: must have password                 │
+└─────────────────────────────────────────────────────┘
+```
 
 #### Two Rendering Paths
 
@@ -515,10 +541,11 @@ acl:
 | `acl.enabled` | `false` | Enable ACL |
 | `acl.existingSecret` | `""` | Existing Secret with `users.acl` key (ignores `acl.users` when set) |
 | `acl.users` | `{}` | Structured ACL user definitions (map of username to config) |
-| `acl.users.<name>.permissions` | `"~* &* +@all"` | ACL rule string |
+| `acl.users.<name>.permissions` | — | ACL rule string (**required**) |
 | `acl.users.<name>.password` | `""` | Inline password |
 | `acl.users.<name>.existingPasswordSecret` | `""` | Existing Secret name for password |
 | `acl.users.<name>.passwordKey` | `""` | Key in the existing Secret |
+| `acl.replicationUser` | `""` | Username for replication auth (must be defined in `acl.users`) |
 
 ### 4.3 TLS/SSL
 
@@ -538,11 +565,13 @@ When `tls.disablePlaintext: true`, the plaintext port is set to 0 in valkey.conf
 
 ```
 tls-port 6380
-tls-cert-file /etc/valkey/tls/tls.crt
-tls-key-file /etc/valkey/tls/tls.key
-tls-ca-cert-file /etc/valkey/tls/ca.crt
+tls-cert-file /etc/valkey/tls/<certKey>
+tls-key-file /etc/valkey/tls/<keyKey>
+tls-ca-cert-file /etc/valkey/tls/<caKey>
 tls-auth-clients no
 ```
+
+The file names (`tls.crt`, `tls.key`, `ca.crt` by default) are configurable via `tls.certKey`, `tls.keyKey`, and `tls.caKey`. This allows using existing TLS Secrets that use non-standard key names (e.g., `server.crt`, `server.key`, `root-ca.crt`).
 
 Additional directives are added based on mode:
 - **Cluster mode:** `tls-cluster yes` (encrypts cluster bus traffic)
@@ -567,6 +596,30 @@ openssl dhparam -out dhparams.pem 2048
 kubectl create secret generic my-dh-params --from-file=dhparams.pem
 ```
 
+#### TLS Key Resolution
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    TLS Secret                                │
+│                                                              │
+│  Key in Secret           Configured via        Default       │
+│  ─────────────           ──────────────        ───────       │
+│  {{ tls.certKey }}       tls.certKey           tls.crt       │
+│  {{ tls.keyKey }}        tls.keyKey            tls.key       │
+│  {{ tls.caKey }}         tls.caKey             ca.crt        │
+│                                                              │
+└──────────────────────┬───────────────────────────────────────┘
+                       │ mounted at {{ tls.certMountPath }}
+                       │ (default: /etc/valkey/tls)
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│  valkey.conf                                                 │
+│  tls-cert-file {{ certMountPath }}/{{ certKey }}             │
+│  tls-key-file  {{ certMountPath }}/{{ keyKey }}              │
+│  tls-ca-cert-file {{ certMountPath }}/{{ caKey }}            │
+└──────────────────────────────────────────────────────────────┘
+```
+
 #### TLS-Aware Components
 
 All chart components support TLS when enabled:
@@ -580,7 +633,7 @@ All chart components support TLS when enabled:
 
 #### Certificate Sources
 
-1. **Existing Secret** (`tls.existingSecret`): Must contain keys `tls.crt`, `tls.key`, `ca.crt`
+1. **Existing Secret** (`tls.existingSecret`): Must contain keys matching `tls.certKey`, `tls.keyKey`, `tls.caKey` (defaults: `tls.crt`, `tls.key`, `ca.crt`)
 2. **cert-manager** (`tls.certManager.enabled`): Automatically creates a Certificate resource
 
 #### Configuration
@@ -594,6 +647,9 @@ All chart components support TLS when enabled:
 | `tls.replication` | `false` | TLS for replication |
 | `tls.authClients` | `"no"` | Client cert requirement: `yes`, `no`, `optional` |
 | `tls.disablePlaintext` | `false` | Disable plaintext port |
+| `tls.certKey` | `"tls.crt"` | Key name for the certificate in the TLS Secret |
+| `tls.keyKey` | `"tls.key"` | Key name for the private key in the TLS Secret |
+| `tls.caKey` | `"ca.crt"` | Key name for the CA certificate in the TLS Secret |
 | `tls.dhParamsSecret` | `""` | Secret with DH parameters (key: `dhparams.pem`) |
 | `tls.ciphers` | `""` | TLS 1.2 cipher suites |
 | `tls.ciphersuites` | `""` | TLS 1.3 cipher suites |
@@ -804,7 +860,7 @@ Both hooks:
 
 User-defined `lifecycle` hooks override the built-in graceful failover.
 
-### 4.9 Hardened Images
+### 4.9 Hardened Images & Read-Only Root Filesystem
 
 Security-hardened container configuration for the distroless image variant.
 
@@ -822,6 +878,14 @@ When `image.variant: hardened`:
 
 These settings are **hardcoded** for the hardened variant and override any `containerSecurityContext` values.
 
+#### Read-Only Root Filesystem (Default Behavior)
+
+As of this chart version, `containerSecurityContext.readOnlyRootFilesystem` defaults to `true` even for the RPM variant. This means the `/tmp` and `/run/valkey` emptyDir mounts are provisioned by default for all variants, not just hardened. The emptyDir mounts are added whenever either condition is true:
+- `image.variant: hardened`
+- `containerSecurityContext.readOnlyRootFilesystem: true` (the default)
+
+To opt out, explicitly set `containerSecurityContext.readOnlyRootFilesystem: false`.
+
 #### Job Images
 
 Jobs (cluster-init, cluster-scale, cluster-precheck, backup, test-connection) **always use the RPM image** regardless of `image.variant`, because they require shell tools (`sh`, `grep`, `awk`, `valkey-cli`).
@@ -838,6 +902,39 @@ When `metrics.enabled: true`, an `oliver006/redis_exporter` sidecar container is
 - Connects to Valkey via `redis://localhost:{service.port}` (default 6379) or `rediss://localhost:{tls.port}` (default 6380) with TLS
 - Authenticates via `REDIS_PASSWORD` environment variable
 - TLS: Mounts CA certificate via `REDIS_EXPORTER_TLS_CA_CERT_FILE` for verification
+- Custom command and args (`metrics.command`, `metrics.args`) for advanced exporter configuration
+- Configurable security context (`metrics.securityContext`) — defaults to a hardened profile matching the main container
+
+#### Exporter Container Customization
+
+The exporter container supports additional configuration for complex monitoring setups:
+
+```yaml
+metrics:
+  ## Custom security context for the exporter container
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+
+  ## Extra environment variables for the exporter
+  extraEnvs:
+    - name: REDIS_EXPORTER_LOG_FORMAT
+      value: json
+
+  ## Extra volume mounts for the exporter
+  extraVolumeMounts:
+    - name: exporter-config
+      mountPath: /etc/exporter
+
+  ## Extra secrets mounted as volumes into the exporter
+  extraSecrets:
+    - name: exporter-tls-cert
+      mountPath: /etc/exporter/tls
+```
 
 #### ServiceMonitor
 
@@ -847,10 +944,16 @@ Creates a Prometheus Operator ServiceMonitor for automatic scrape configuration:
 metrics:
   serviceMonitor:
     enabled: true
-    namespace: ""          # Target namespace (default: release namespace)
-    interval: 30s          # Scrape interval
-    scrapeTimeout: ""      # Scrape timeout
-    labels: {}             # Additional labels
+    namespace: ""              # Target namespace (default: release namespace)
+    interval: 30s              # Scrape interval
+    scrapeTimeout: ""          # Scrape timeout
+    labels: {}                 # Additional labels
+    honorLabels: false         # Preserve original labels from the target
+    podTargetLabels: []        # Labels to transfer from pod to metrics
+    relabelings: []            # Pre-scrape label rewriting rules
+    metricRelabelings: []      # Post-scrape metric rewriting rules
+    sampleLimit: ""            # Per-scrape sample limit
+    targetLimit: ""            # Max number of targets
 ```
 
 #### PodMonitor
@@ -864,6 +967,12 @@ metrics:
     namespace: ""
     interval: 30s
     labels: {}
+    honorLabels: false
+    podTargetLabels: []
+    relabelings: []
+    metricRelabelings: []
+    sampleLimit: ""
+    targetLimit: ""
 ```
 
 #### PrometheusRule
@@ -882,6 +991,35 @@ metrics:
           severity: critical
         annotations:
           summary: "Valkey instance {{ $labels.instance }} is down"
+```
+
+#### Metrics Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Valkey Pod                                  │
+│  ┌──────────────────┐    ┌──────────────────────────────────┐  │
+│  │  valkey-server    │    │  redis_exporter (sidecar)        │  │
+│  │  :6379 / :6380    │───▶│  :9121                           │  │
+│  │                   │    │                                   │  │
+│  │                   │    │  env: REDIS_PASSWORD              │  │
+│  │                   │    │  env: extraEnvs[*]                │  │
+│  │                   │    │  mounts: extraVolumeMounts[*]     │  │
+│  │                   │    │  mounts: extraSecrets[*]          │  │
+│  └──────────────────┘    └──────────┬───────────────────────┘  │
+└─────────────────────────────────────┼──────────────────────────┘
+                                      │ :9121
+                    ┌─────────────────▼──────────────────┐
+                    │   ServiceMonitor / PodMonitor       │
+                    │   relabelings, metricRelabelings    │
+                    │   honorLabels, sampleLimit          │
+                    └─────────────────┬──────────────────┘
+                                      │
+                    ┌─────────────────▼──────────────────┐
+                    │   Prometheus                        │
+                    │                                     │
+                    │   PrometheusRule (alerting)          │
+                    └────────────────────────────────────┘
 ```
 
 ### 4.11 Autoscaling
@@ -1154,8 +1292,13 @@ The chart includes template-level validation that catches dangerous or impossibl
 | TLS plaintext requires TLS | `tls.disablePlaintext` without `tls.enabled` | `tls.disablePlaintext requires tls.enabled=true` |
 | Deployment mode requires standalone | `standalone.useDeployment` with `mode != standalone` | `standalone.useDeployment requires mode=standalone` |
 | Deployment mode requires no persistence | `standalone.useDeployment` with `persistence.enabled` | `standalone.useDeployment requires persistence.enabled=false` |
+| hostPath mutex | `persistence.enabled` with `persistence.hostPath` | `persistence.hostPath is mutually exclusive with persistence.enabled=true` |
+| ACL default user reserved | `acl.users.default` defined | `acl.users.default: the default user is auto-managed by the chart — do not define it in acl.users` |
+| ACL user missing permissions | `acl.users.<name>` without `permissions` | `acl.users.<name>: permissions field is required` |
 | ACL user missing passwordKey | `existingPasswordSecret` without `passwordKey` | `acl.users.<name>: existingPasswordSecret requires passwordKey` |
 | ACL user dual password | Both `password` and `existingPasswordSecret` set | `acl.users.<name>: cannot set both password and existingPasswordSecret` |
+| ACL replication user missing | `acl.replicationUser` not in `acl.users` | `acl.replicationUser '<name>' must be defined in acl.users` |
+| ACL replication user no password | Replication user has neither `password` nor `existingPasswordSecret` | `acl.replicationUser '<name>' must have a password or existingPasswordSecret` |
 
 Validation is invoked at the top of `configmap.yaml`, so it runs during any `helm template`, `helm install`, or `helm upgrade` operation.
 
@@ -1224,6 +1367,57 @@ min-replicas-max-lag 10
 
 This prevents the primary from accepting writes when too few replicas are connected, reducing the risk of data loss during network partitions. Set to `0` (default) to disable.
 
+### 4.25 Per-Mode Persistence Overrides
+
+The chart allows overriding the global `persistence.size` and `persistence.storageClass` on a per-mode basis. This is useful when cluster and sentinel modes have different storage requirements than standalone.
+
+#### Resolution Order
+
+```
+┌────────────────────────────────────────┐
+│ mode = cluster?                        │
+│   cluster.persistence.size set?        │
+│     YES → use cluster.persistence.size │
+│     NO  ↓                              │
+│ mode = sentinel?                       │
+│   sentinel.dataPersistence.size set?   │
+│     YES → use sentinel.dataPersistence │
+│     NO  ↓                              │
+│ Fall through to persistence.size       │
+└────────────────────────────────────────┘
+```
+
+Same logic applies for `storageClass`.
+
+#### Example
+
+```yaml
+# Global default: 8Gi
+persistence:
+  size: 8Gi
+
+# Cluster nodes get 20Gi each
+cluster:
+  persistence:
+    size: 20Gi
+    storageClass: fast-ssd
+
+# Sentinel data pods get 16Gi each
+sentinel:
+  dataPersistence:
+    size: 16Gi
+    storageClass: standard
+```
+
+#### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cluster.persistence.size` | `""` | Override global `persistence.size` for cluster mode |
+| `cluster.persistence.storageClass` | `""` | Override global `persistence.storageClass` for cluster mode |
+| `sentinel.dataPersistence.size` | `""` | Override global `persistence.size` for sentinel data pods |
+| `sentinel.dataPersistence.storageClass` | `""` | Override global `persistence.storageClass` for sentinel data pods |
+
 ---
 
 ## 5. Configuration Reference
@@ -1268,10 +1462,11 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `acl.enabled` | bool | `false` | Enable ACL |
 | `acl.existingSecret` | string | `""` | Existing Secret with `users.acl` key |
 | `acl.users` | object | `{}` | Structured ACL user definitions (map of username to config) |
-| `acl.users.<name>.permissions` | string | `"~* &* +@all"` | ACL rule string |
+| `acl.users.<name>.permissions` | string | — | ACL rule string (**required**) |
 | `acl.users.<name>.password` | string | `""` | Inline password |
 | `acl.users.<name>.existingPasswordSecret` | string | `""` | Existing Secret name for password |
 | `acl.users.<name>.passwordKey` | string | `""` | Key in the existing Secret |
+| `acl.replicationUser` | string | `""` | Username for replication auth (must exist in `acl.users`) |
 
 ### TLS/SSL Configuration
 
@@ -1284,6 +1479,9 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `tls.replication` | bool | `false` | TLS for replication traffic |
 | `tls.authClients` | string | `"no"` | Client cert requirement |
 | `tls.disablePlaintext` | bool | `false` | Disable non-TLS port |
+| `tls.certKey` | string | `"tls.crt"` | Key name for the certificate in the TLS Secret |
+| `tls.keyKey` | string | `"tls.key"` | Key name for the private key in the TLS Secret |
+| `tls.caKey` | string | `"ca.crt"` | Key name for the CA certificate in the TLS Secret |
 | `tls.dhParamsSecret` | string | `""` | Secret with DH parameters (key: `dhparams.pem`) |
 | `tls.ciphers` | string | `""` | TLS 1.2 cipher suites |
 | `tls.ciphersuites` | string | `""` | TLS 1.3 cipher suites |
@@ -1318,6 +1516,8 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `cluster.nodeTimeout` | int | `15000` | Node timeout in ms |
 | `cluster.busPort` | int | `16379` | Cluster bus port |
 | `cluster.precheckBeforeScaleDown` | bool | `true` | Enable pre-upgrade safety check |
+| `cluster.persistence.size` | string | `""` | Override global `persistence.size` for cluster mode |
+| `cluster.persistence.storageClass` | string | `""` | Override global `persistence.storageClass` for cluster mode |
 
 ### Standalone Mode Settings
 
@@ -1342,6 +1542,8 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `sentinel.resources` | object | `{}` | Sentinel pod resources |
 | `sentinel.persistence.enabled` | bool | `false` | Sentinel persistence |
 | `sentinel.persistence.size` | string | `"1Gi"` | Sentinel PVC size |
+| `sentinel.dataPersistence.size` | string | `""` | Override global `persistence.size` for sentinel data pods |
+| `sentinel.dataPersistence.storageClass` | string | `""` | Override global `persistence.storageClass` for sentinel data pods |
 | `sentinel.podAntiAffinityPreset.type` | string | `""` | Anti-affinity type |
 | `sentinel.podAntiAffinityPreset.topologyKey` | string | `"kubernetes.io/hostname"` | Topology key |
 | `sentinel.podAnnotations` | object | `{}` | Sentinel pod annotations |
@@ -1374,9 +1576,39 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `securityContext.runAsGroup` | int | `999` | Pod-level GID |
 | `securityContext.fsGroup` | int | `999` | Pod-level fsGroup |
 | `securityContext.runAsNonRoot` | bool | `true` | Enforce non-root |
-| `containerSecurityContext.readOnlyRootFilesystem` | bool | `false` | Read-only root FS |
+| `securityContext.seccompProfile.type` | string | `"RuntimeDefault"` | Seccomp profile type |
+| `containerSecurityContext.readOnlyRootFilesystem` | bool | `true` | Read-only root FS (triggers emptyDir mounts for `/tmp` and `/run/valkey`) |
 | `containerSecurityContext.allowPrivilegeEscalation` | bool | `false` | Prevent privilege escalation |
 | `containerSecurityContext.capabilities.drop` | list | `["ALL"]` | Drop Linux capabilities |
+
+#### Security Context Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Pod-Level Security Context (securityContext)           │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ runAsUser: 999                                    │  │
+│  │ runAsGroup: 999                                   │  │
+│  │ fsGroup: 999                                      │  │
+│  │ runAsNonRoot: true                                │  │
+│  │ seccompProfile:                                   │  │
+│  │   type: RuntimeDefault                            │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  Container-Level (containerSecurityContext)              │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ readOnlyRootFilesystem: true ← triggers tmpfs     │  │
+│  │ allowPrivilegeEscalation: false                   │  │
+│  │ capabilities: { drop: [ALL] }                     │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  Writable Paths (emptyDir when readOnlyRootFilesystem): │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ /data    │  │ /tmp         │  │ /run/valkey      │  │
+│  │ (PVC)    │  │ (emptyDir)   │  │ (emptyDir)       │  │
+│  └──────────┘  └──────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
 
 ### Service Parameters
 
@@ -1393,8 +1625,9 @@ This prevents the primary from accepting writes when too few replicas are connec
 | `persistence.enabled` | bool | `true` | Enable persistent storage |
 | `persistence.storageClass` | string | `""` | Storage class |
 | `persistence.accessModes` | list | `["ReadWriteOnce"]` | Access modes |
-| `persistence.size` | string | `"8Gi"` | PVC size |
+| `persistence.size` | string | `"8Gi"` | PVC size (overridable per-mode via `cluster.persistence.size` / `sentinel.dataPersistence.size`) |
 | `persistence.annotations` | object | `{}` | PVC annotations |
+| `persistence.hostPath` | string | `""` | Use hostPath volume instead of PVC (mutually exclusive with `persistence.enabled=true`) |
 
 ### Health Probes
 
@@ -1505,19 +1738,50 @@ Explicit `resources.limits`/`resources.requests` always override presets.
 | `metrics.image.pullPolicy` | string | `"IfNotPresent"` | Pull policy |
 | `metrics.port` | int | `9121` | Metrics port |
 | `metrics.resources` | object | `{}` | Exporter resources |
+| `metrics.command` | list | `[]` | Override exporter command |
+| `metrics.args` | list | `[]` | Override exporter args |
+| `metrics.securityContext` | object | *(see below)* | Exporter container security context |
+| `metrics.extraEnvs` | list | `[]` | Extra environment variables for the exporter |
+| `metrics.extraVolumeMounts` | list | `[]` | Extra volume mounts for the exporter |
+| `metrics.extraSecrets` | list | `[]` | Extra secrets mounted as volumes (items: `{name, mountPath}`) |
 | `metrics.serviceMonitor.enabled` | bool | `false` | Enable ServiceMonitor |
 | `metrics.serviceMonitor.namespace` | string | `""` | ServiceMonitor namespace |
 | `metrics.serviceMonitor.interval` | string | `"30s"` | Scrape interval |
 | `metrics.serviceMonitor.scrapeTimeout` | string | `""` | Scrape timeout |
 | `metrics.serviceMonitor.labels` | object | `{}` | ServiceMonitor labels |
+| `metrics.serviceMonitor.honorLabels` | bool | `false` | Preserve original labels from targets |
+| `metrics.serviceMonitor.podTargetLabels` | list | `[]` | Labels to transfer from pod to metrics |
+| `metrics.serviceMonitor.relabelings` | list | `[]` | Pre-scrape relabeling rules |
+| `metrics.serviceMonitor.metricRelabelings` | list | `[]` | Post-scrape metric relabeling rules |
+| `metrics.serviceMonitor.sampleLimit` | string | `""` | Per-scrape sample limit |
+| `metrics.serviceMonitor.targetLimit` | string | `""` | Max number of scrape targets |
 | `metrics.podMonitor.enabled` | bool | `false` | Enable PodMonitor |
 | `metrics.podMonitor.namespace` | string | `""` | PodMonitor namespace |
 | `metrics.podMonitor.interval` | string | `"30s"` | Scrape interval |
 | `metrics.podMonitor.labels` | object | `{}` | PodMonitor labels |
+| `metrics.podMonitor.honorLabels` | bool | `false` | Preserve original labels from targets |
+| `metrics.podMonitor.podTargetLabels` | list | `[]` | Labels to transfer from pod to metrics |
+| `metrics.podMonitor.relabelings` | list | `[]` | Pre-scrape relabeling rules |
+| `metrics.podMonitor.metricRelabelings` | list | `[]` | Post-scrape metric relabeling rules |
+| `metrics.podMonitor.sampleLimit` | string | `""` | Per-scrape sample limit |
+| `metrics.podMonitor.targetLimit` | string | `""` | Max number of scrape targets |
 | `metrics.prometheusRule.enabled` | bool | `false` | Enable PrometheusRule |
 | `metrics.prometheusRule.namespace` | string | `""` | PrometheusRule namespace |
 | `metrics.prometheusRule.labels` | object | `{}` | PrometheusRule labels |
 | `metrics.prometheusRule.rules` | list | `[]` | Alerting rules |
+
+#### Metrics Security Context Defaults
+
+```yaml
+metrics:
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+```
 
 ### Graceful Failover
 
@@ -1624,7 +1888,7 @@ Explicit `resources.limits`/`resources.requests` always override presets.
 
 ## 6. Helper Templates Reference
 
-The chart defines 25 named templates in `_helpers.tpl`:
+The chart defines 27 named templates in `_helpers.tpl`:
 
 | Template | Description | Usage |
 |----------|-------------|-------|
@@ -1640,7 +1904,7 @@ The chart defines 25 named templates in `_helpers.tpl`:
 | `percona-valkey.secretName` | Secret name: `auth.existingSecret` or fullname. | Password references |
 | `percona-valkey.aclSecretName` | ACL Secret name: `acl.existingSecret` if provided, otherwise fullname (shares the main password Secret). | ACL volume mount |
 | `percona-valkey.tlsSecretName` | TLS Secret name: `tls.existingSecret` or `<fullname>-tls`. | TLS volume mount, cert-manager |
-| `percona-valkey.tlsCliFlags` | TLS CLI flags for valkey-cli: `--tls --cacert ... --cert ... --key ...`. Returns empty string if TLS disabled. | Probes, Jobs, lifecycle hooks |
+| `percona-valkey.tlsCliFlags` | TLS CLI flags for valkey-cli using configurable key names: `--tls --cacert .../{{ caKey }} --cert .../{{ certKey }} --key .../{{ keyKey }}`. Returns empty string if TLS disabled. | Probes, Jobs, lifecycle hooks |
 | `percona-valkey.replicaCount` | Replica count based on mode: `cluster.replicas`, `sentinel.replicas`, or `standalone.replicas`. | StatefulSet spec |
 | `percona-valkey.resourcePreset` | Returns resources dict for preset name (nano, micro, small, medium, large, xlarge). | Resource resolution |
 | `percona-valkey.resources` | Resolves effective resources: explicit values override preset. | StatefulSet/Deployment containers |
@@ -1653,6 +1917,8 @@ The chart defines 25 named templates in `_helpers.tpl`:
 | `percona-valkey.aclInlineUsers` | Renders ACL lines for users with inline passwords (skips users with `existingPasswordSecret`). | Secret ACL content |
 | `percona-valkey.useDeployment` | Returns `"true"` if `standalone.useDeployment` is set and mode is standalone. | Deployment vs StatefulSet rendering |
 | `percona-valkey.validateValues` | Collects configuration errors and fails with all errors at once. | configmap.yaml (invoked first) |
+| `percona-valkey.persistenceSize` | Resolves effective PVC size: `cluster.persistence.size` > `sentinel.dataPersistence.size` > `persistence.size`. | StatefulSet volumeClaimTemplates |
+| `percona-valkey.persistenceStorageClass` | Resolves effective storageClass: `cluster.persistence.storageClass` > `sentinel.dataPersistence.storageClass` > `persistence.storageClass`. | StatefulSet volumeClaimTemplates |
 
 ---
 
@@ -2008,7 +2274,7 @@ kubectl describe certificate <release>-tls
 #### Manual Certificate Rotation
 
 ```bash
-# Update the TLS secret
+# Update the TLS secret (key names must match tls.certKey, tls.keyKey, tls.caKey)
 kubectl create secret generic <release>-tls \
   --from-file=tls.crt=new-server.crt \
   --from-file=tls.key=new-server.key \
@@ -2018,6 +2284,8 @@ kubectl create secret generic <release>-tls \
 # Trigger rolling restart
 kubectl rollout restart statefulset <release>
 ```
+
+If you customized the TLS key names (e.g., `tls.certKey=server.crt`), use those names in the `--from-file` arguments.
 
 ### 8.8 NOTES.txt Output Explained
 
@@ -2043,7 +2311,7 @@ helm test my-valkey
 The test pod:
 - Connects to the main service
 - Executes `valkey-cli ping`
-- Supports TLS: automatically uses TLS port and flags (`--tls --cacert ... --cert ... --key ...`) when `tls.enabled=true`
+- Supports TLS: automatically uses TLS port and configurable cert key names (`--tls --cacert .../{{ caKey }} --cert .../{{ certKey }} --key .../{{ keyKey }}`) when `tls.enabled=true`
 - Supports authentication: injects `VALKEY_PASSWORD` from the chart Secret
 - Validates `PONG` response
 - Uses the RPM image (respects `image.jobs.*` overrides)
@@ -2053,7 +2321,7 @@ The test pod:
 
 ## 9. Test Suite Documentation
 
-The chart includes a comprehensive test suite in `test-chart.sh` (5000+ lines) covering lint tests, template rendering tests, and live deployment tests.
+The chart includes a comprehensive test suite in `test-chart.sh` (6300+ lines) covering lint tests, template rendering tests, and live deployment tests.
 
 ### 9.1 Test Framework Overview
 
@@ -2106,7 +2374,7 @@ NAMESPACE="default"
 SKIP_HARDENED="${SKIP_HARDENED:-false}"
 ```
 
-### 9.2 Lint Tests (17+ Tests)
+### 9.2 Lint Tests (28+ Tests)
 
 Lint tests validate that `helm lint` passes for all supported configurations.
 
@@ -2129,8 +2397,19 @@ Lint tests validate that `helm lint` passes for all supported configurations.
 | 15 | lint minReplicasToWrite | `config.minReplicasToWrite=1` | Validates write quorum setting |
 | 16 | lint dhParamsSecret | `tls.dhParamsSecret=my-dh` | Validates DH parameters setting |
 | 17 | lint useDeployment | `standalone.useDeployment=true, persistence.enabled=false` | Validates Deployment mode |
+| 18 | lint F11 relabelings | `metrics.serviceMonitor.enabled=true` + relabelings | ServiceMonitor relabeling config |
+| 19 | lint F12 sampleLimit | `metrics.serviceMonitor.enabled=true` + sampleLimit | ServiceMonitor sample limit |
+| 20 | lint F13 honorLabels | `metrics.serviceMonitor.enabled=true` + honorLabels | ServiceMonitor honor labels |
+| 21 | lint F14 extraEnvs | `metrics.enabled=true` + extraEnvs | Exporter extra env vars |
+| 22 | lint F15 metrics securityContext | `metrics.enabled=true` + securityContext | Exporter security context |
+| 23 | lint F16 readOnlyRootFilesystem default | Default values | Read-only root FS now default true |
+| 24 | lint F17 seccompProfile | Default values | Seccomp profile present |
+| 25 | lint F18 custom TLS keys | `tls.enabled=true` + custom certKey/keyKey/caKey | Configurable TLS key names |
+| 26 | lint F19 default user protection | ACL with `acl.users.default` | Must fail — reserved username |
+| 27 | lint F20 permissions required | ACL user without permissions | Must fail — missing permissions |
+| 28 | lint F21 cluster persistence override | `mode=cluster` + `cluster.persistence.size=20Gi` | Per-mode persistence |
 
-### 9.3 Template Render Tests (~320 Assertions)
+### 9.3 Template Render Tests (~342 Assertions)
 
 Template tests use `helm template` to render manifests and verify their contents with `grep`, `jq`, or string matching. They are organized by feature area.
 
@@ -2371,7 +2650,7 @@ Template tests use `helm template` to render manifests and verify their contents
 - Uses shell builtins only (hardened compatible)
 - No-auth mode (AUTH="")
 
-#### Validation Helpers (9 tests)
+#### Validation Helpers (11 tests)
 - ACL without auth fails
 - Sentinel + externalAccess fails
 - passwordRotation without auth fails
@@ -2381,6 +2660,8 @@ Template tests use `helm template` to render manifests and verify their contents
 - TLS disablePlaintext without TLS fails
 - Valid cluster config renders OK
 - Standalone without persistence allowed
+- ACL default user protection (F19): `acl.users.default` causes validation error
+- ACL permissions required (F20): user without `permissions` causes validation error
 
 #### Simple Environment Variables (4 tests)
 - env map renders in statefulset
@@ -2416,6 +2697,27 @@ Template tests use `helm template` to render manifests and verify their contents
 - Hardened overrides containerSecurityContext
 - All monitoring components together
 - Cluster + metrics + networkPolicy combined
+
+#### Monitoring Enhancements — F11-F13 (6 tests)
+- **F11:** relabelings rendered in ServiceMonitor; metricRelabelings rendered in PodMonitor
+- **F12:** sampleLimit at spec level in ServiceMonitor; targetLimit at spec level in PodMonitor
+- **F13:** honorLabels at endpoint level in ServiceMonitor; podTargetLabels at spec level in PodMonitor
+
+#### Metrics Exporter Extras — F14-F15 (6 tests)
+- **F14:** extraEnvs rendered in metrics container; extraSecrets volume + mount; extraVolumeMounts rendered; all absent by default
+- **F15:** custom securityContext renders in metrics container; default securityContext matches expected values
+
+#### Security Hardening — F16-F17 (3 tests)
+- **F16:** `/tmp` and `/run/valkey` emptyDir mounts present by default (readOnlyRootFilesystem=true); absent when readOnlyRootFilesystem=false
+- **F17:** seccompProfile renders in pod securityContext
+
+#### Configurable TLS Key Names — F18 (2 tests)
+- Custom key names in TLS volume items (`server.crt`/`server.key`/`root-ca.crt`)
+- Custom key names in configmap TLS directives
+
+#### Per-Mode Persistence Overrides — F21 (2 tests)
+- `cluster.persistence.size=20Gi` overrides global `persistence.size=8Gi`
+- Fallback to global `persistence.size` when cluster override not set
 
 ### 9.4 Deployment Tests (40+ Tests)
 
@@ -2656,7 +2958,7 @@ Exit code: 0 if all passed, 1 if any failed.
 2. **Insufficient resources** — Valkey cannot allocate memory. Set `config.maxmemory` or increase `resources.limits.memory`.
 3. **PVC permissions** — Enable `volumePermissions.enabled=true` to fix ownership on the `/data` volume.
 4. **Invalid config** — Check `config.customConfig` for syntax errors. Use `kubectl logs <pod>` to see Valkey startup errors.
-5. **Missing TLS certificates** — If `tls.enabled=true`, ensure the TLS Secret exists with keys `tls.crt`, `tls.key`, `ca.crt`.
+5. **Missing TLS certificates** — If `tls.enabled=true`, ensure the TLS Secret exists with keys matching `tls.certKey`, `tls.keyKey`, `tls.caKey` (defaults: `tls.crt`, `tls.key`, `ca.crt`).
 
 ### Readiness Probe Failures
 
@@ -2690,14 +2992,14 @@ kubectl logs job/<release>-cluster-init
 3. **Network policy blocking** — Ensure NetworkPolicy allows port 6379 and 16379 between pods.
 4. **Existing cluster state** — If pods have stale `nodes.conf` from a previous installation, delete the PVCs and retry.
 
-### Permission Denied (Hardened Image)
+### Permission Denied (Read-Only Root Filesystem)
 
 **Symptoms:** `Read-only file system` errors in pod logs.
 
 **Resolution:**
-- The hardened variant sets `readOnlyRootFilesystem: true`
-- Writable paths: `/data` (PVC), `/tmp` (tmpfs), `/run/valkey` (tmpfs)
-- If Valkey needs to write elsewhere, switch to the RPM variant or add custom volume mounts
+- By default, `containerSecurityContext.readOnlyRootFilesystem` is `true` for all variants (hardened and RPM)
+- Writable paths: `/data` (PVC), `/tmp` (emptyDir), `/run/valkey` (emptyDir)
+- If Valkey needs to write elsewhere, set `containerSecurityContext.readOnlyRootFilesystem: false` or add custom volume mounts
 
 ### Sentinel No Master
 
