@@ -1607,6 +1607,24 @@ test_template_render() {
         fail "template image pullPolicy=Always"
     fi
 
+    # pullPolicy propagates to initContainers (sysctl-init)
+    out=$(helm template test "$CHART_DIR" --set sysctlInit.enabled=true --set image.pullPolicy=Always --show-only templates/statefulset.yaml 2>&1)
+    local sysctl_pull
+    sysctl_pull=$(echo "$out" | sed -n '/name: sysctl-init/,/- name:/p' | grep "imagePullPolicy")
+    if echo "$sysctl_pull" | grep -q "Always"; then
+        pass "template pullPolicy propagates to sysctl-init"
+    else
+        fail "template pullPolicy propagates to sysctl-init"
+    fi
+
+    # pullPolicy propagates to metrics sidecar
+    out=$(helm template test "$CHART_DIR" --set metrics.enabled=true --set metrics.image.pullPolicy=Always --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | sed -n '/redis_exporter/,/---/p' | grep -q "imagePullPolicy: Always"; then
+        pass "template pullPolicy propagates to metrics sidecar"
+    else
+        fail "template pullPolicy propagates to metrics sidecar"
+    fi
+
     # Multiple pullSecrets
     out=$(helm template test "$CHART_DIR" \
         --set 'image.pullSecrets[0].name=secret-one' \
@@ -3502,6 +3520,42 @@ test_template_render() {
         pass "template Deployment metrics sidecar image"
     else
         fail "template Deployment metrics sidecar image"
+    fi
+
+    # Deployment custom image.repository
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set image.repository=mycorp/valkey --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "image: mycorp/valkey:"; then
+        pass "template Deployment custom image.repository"
+    else
+        fail "template Deployment custom image.repository"
+    fi
+
+    # Deployment custom image.tag
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set image.tag=custom-7.0 --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "image: perconalab/valkey:custom-7.0"; then
+        pass "template Deployment custom image.tag"
+    else
+        fail "template Deployment custom image.tag"
+    fi
+
+    # Deployment custom serviceAccountName
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set serviceAccount.name=custom-sa --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "serviceAccountName: custom-sa"; then
+        pass "template Deployment custom serviceAccountName"
+    else
+        fail "template Deployment custom serviceAccountName"
+    fi
+
+    # Deployment imagePullSecrets absent by default
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --show-only templates/deployment.yaml 2>&1)
+    if ! echo "$out" | grep -q "imagePullSecrets"; then
+        pass "template Deployment imagePullSecrets absent by default"
+    else
+        fail "template Deployment imagePullSecrets absent by default"
     fi
 
     # --- SHA256 password hashing ---
