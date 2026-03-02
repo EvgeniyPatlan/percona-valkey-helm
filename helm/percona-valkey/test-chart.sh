@@ -746,6 +746,138 @@ test_template_render() {
         fail "template service annotations"
     fi
 
+    # --- Service field-level tests (upstream parity) ---
+
+    # service clusterIP
+    out=$(helm template test "$CHART_DIR" --set service.clusterIP=10.0.0.100 --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "clusterIP: 10.0.0.100"; then
+        pass "template service clusterIP"
+    else
+        fail "template service clusterIP"
+    fi
+
+    # service loadBalancerClass
+    out=$(helm template test "$CHART_DIR" --set service.loadBalancerClass=custom-lb --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "loadBalancerClass: custom-lb"; then
+        pass "template service loadBalancerClass"
+    else
+        fail "template service loadBalancerClass"
+    fi
+
+    # service loadBalancerClass absent by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if ! echo "$out" | grep -q "loadBalancerClass"; then
+        pass "template service loadBalancerClass absent by default"
+    else
+        fail "template service loadBalancerClass absent by default"
+    fi
+
+    # service appProtocol on ports
+    out=$(helm template test "$CHART_DIR" --set service.appProtocol=redis --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "appProtocol: redis"; then
+        pass "template service appProtocol"
+    else
+        fail "template service appProtocol"
+    fi
+
+    # service appProtocol absent by default
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if ! echo "$out" | grep -q "appProtocol"; then
+        pass "template service appProtocol absent by default"
+    else
+        fail "template service appProtocol absent by default"
+    fi
+
+    # service default port
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "port: 6379"; then
+        pass "template service default port 6379"
+    else
+        fail "template service default port 6379"
+    fi
+
+    # service selector labels
+    out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "app.kubernetes.io/name: percona-valkey" && echo "$out" | grep -q "app.kubernetes.io/instance: test"; then
+        pass "template service selector labels"
+    else
+        fail "template service selector labels"
+    fi
+
+    # headless service selector labels
+    out=$(helm template test "$CHART_DIR" --show-only templates/service-headless.yaml 2>&1)
+    if echo "$out" | grep -q "app.kubernetes.io/name: percona-valkey" && echo "$out" | grep -q "app.kubernetes.io/instance: test"; then
+        pass "template headless service selector labels"
+    else
+        fail "template headless service selector labels"
+    fi
+
+    # read service loadBalancerClass
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --set service.loadBalancerClass=my-lb --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "loadBalancerClass: my-lb"; then
+        pass "template read service loadBalancerClass"
+    else
+        fail "template read service loadBalancerClass"
+    fi
+
+    # read service appProtocol
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --set service.appProtocol=redis --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "appProtocol: redis"; then
+        pass "template read service appProtocol"
+    else
+        fail "template read service appProtocol"
+    fi
+
+    # external access loadBalancerSourceRanges
+    out=$(helm template test "$CHART_DIR" --set externalAccess.enabled=true --set 'externalAccess.service.loadBalancerSourceRanges[0]=10.0.0.0/8' --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "10.0.0.0/8"; then
+        pass "template externalAccess loadBalancerSourceRanges"
+    else
+        fail "template externalAccess loadBalancerSourceRanges"
+    fi
+
+    # external access externalTrafficPolicy Local
+    out=$(helm template test "$CHART_DIR" --set externalAccess.enabled=true --set externalAccess.service.externalTrafficPolicy=Local --show-only templates/service.yaml 2>&1)
+    if echo "$out" | grep -q "externalTrafficPolicy: Local"; then
+        pass "template externalAccess externalTrafficPolicy Local"
+    else
+        fail "template externalAccess externalTrafficPolicy Local"
+    fi
+
+    # --- Read service conditional rendering ---
+
+    # read service absent with standalone replicas=1 (default)
+    out=$(helm template test "$CHART_DIR" --show-only templates/service-read.yaml 2>&1 || true)
+    if [ -z "$out" ] || echo "$out" | grep -q "could not find template"; then
+        pass "template read service absent with replicas=1"
+    else
+        fail "template read service absent with replicas=1"
+    fi
+
+    # read service present with standalone replicas=2
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "kind: Service" && echo "$out" | grep -q "\-read"; then
+        pass "template read service present with replicas=2"
+    else
+        fail "template read service present with replicas=2"
+    fi
+
+    # read service absent in cluster mode
+    out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/service-read.yaml 2>&1 || true)
+    if [ -z "$out" ] || echo "$out" | grep -q "could not find template"; then
+        pass "template read service absent in cluster mode"
+    else
+        fail "template read service absent in cluster mode"
+    fi
+
+    # read service selector labels (all pods, not pod-0 specific)
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "app.kubernetes.io/name:" && ! echo "$out" | grep -q "statefulset.kubernetes.io/pod-name"; then
+        pass "template read service selector targets all pods"
+    else
+        fail "template read service selector targets all pods"
+    fi
+
     # headless service cluster-bus port in cluster mode
     out=$(helm template test "$CHART_DIR" --set mode=cluster --show-only templates/service-headless.yaml 2>&1)
     if echo "$out" | grep -q "cluster-bus" && echo "$out" | grep -q "16379"; then
@@ -1378,6 +1510,27 @@ test_template_render() {
         fail "template PVC retention whenScaled=Delete"
     fi
 
+    # PVC retention whenDeleted=Delete
+    out=$(helm template test "$CHART_DIR" \
+        --set persistentVolumeClaimRetentionPolicy.whenDeleted=Delete \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "whenDeleted: Delete"; then
+        pass "template PVC retention whenDeleted=Delete"
+    else
+        fail "template PVC retention whenDeleted=Delete"
+    fi
+
+    # PVC retention both whenDeleted and whenScaled together
+    out=$(helm template test "$CHART_DIR" \
+        --set persistentVolumeClaimRetentionPolicy.whenDeleted=Delete \
+        --set persistentVolumeClaimRetentionPolicy.whenScaled=Delete \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "whenDeleted: Delete" && echo "$out" | grep -q "whenScaled: Delete"; then
+        pass "template PVC retention both whenDeleted and whenScaled"
+    else
+        fail "template PVC retention both whenDeleted and whenScaled"
+    fi
+
     # --- ServiceAccount extras ---
 
     # serviceAccount annotations
@@ -1409,6 +1562,43 @@ test_template_render() {
         pass "template multiple pullSecrets"
     else
         fail "template multiple pullSecrets"
+    fi
+
+    # --- imagePullSecrets propagation ---
+
+    # pullSecrets propagate to deployment mode
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set 'image.pullSecrets[0].name=my-reg-secret' --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "my-reg-secret"; then
+        pass "template pullSecrets propagate to Deployment"
+    else
+        fail "template pullSecrets propagate to Deployment"
+    fi
+
+    # pullSecrets propagate to sentinel statefulset
+    out=$(helm template test "$CHART_DIR" --set mode=sentinel \
+        --set 'image.pullSecrets[0].name=my-reg-secret' --show-only templates/sentinel-statefulset.yaml 2>&1)
+    if echo "$out" | grep -q "my-reg-secret"; then
+        pass "template pullSecrets propagate to sentinel StatefulSet"
+    else
+        fail "template pullSecrets propagate to sentinel StatefulSet"
+    fi
+
+    # pullSecrets propagate to test-connection pod
+    out=$(helm template test "$CHART_DIR" \
+        --set 'image.pullSecrets[0].name=my-reg-secret' --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q "my-reg-secret"; then
+        pass "template pullSecrets propagate to test-connection"
+    else
+        fail "template pullSecrets propagate to test-connection"
+    fi
+
+    # pullSecrets absent when not configured
+    out=$(helm template test "$CHART_DIR" --show-only templates/statefulset.yaml 2>&1)
+    if ! echo "$out" | grep -q "imagePullSecrets"; then
+        pass "template pullSecrets absent when not configured"
+    else
+        fail "template pullSecrets absent when not configured"
     fi
 
     # --- Resource presets (all variants) ---
@@ -1837,6 +2027,14 @@ test_template_render() {
         pass "template test-connection no auth"
     else
         fail "template test-connection no auth"
+    fi
+
+    # test-connection pod has restartPolicy: Never
+    out=$(helm template test "$CHART_DIR" --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q 'restartPolicy: Never'; then
+        pass "template test-connection restartPolicy Never (early)"
+    else
+        fail "template test-connection restartPolicy Never (early)"
     fi
 
     # --- Edge case: auth disabled + existingSecret (should ignore existingSecret) ---
@@ -2790,6 +2988,15 @@ test_template_render() {
         fail "template global.imageRegistry in cluster-scale-job"
     fi
 
+    # Registry works in test-connection pod
+    out=$(helm template test "$CHART_DIR" --set global.imageRegistry=myregistry.io \
+        --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q "myregistry.io/"; then
+        pass "template global.imageRegistry in test-connection"
+    else
+        fail "template global.imageRegistry in test-connection"
+    fi
+
     # --- commonLabels tests ---
 
     # StatefulSet labels include commonLabels
@@ -3133,6 +3340,44 @@ test_template_render() {
         fail "lint deployment mode"
     fi
 
+    # --- Deployment mode field tests ---
+
+    # Deployment has correct image
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "perconalab/valkey"; then
+        pass "template Deployment has correct image"
+    else
+        fail "template Deployment has correct image"
+    fi
+
+    # Deployment has securityContext
+    if echo "$out" | grep -q "runAsNonRoot: true"; then
+        pass "template Deployment has securityContext"
+    else
+        fail "template Deployment has securityContext"
+    fi
+
+    # Deployment has podAnnotations
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set podAnnotations.custom=val --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "custom: val"; then
+        pass "template Deployment has podAnnotations"
+    else
+        fail "template Deployment has podAnnotations"
+    fi
+
+    # Deployment has extraVolumes + mounts
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set 'extraVolumes[0].name=ev' --set 'extraVolumes[0].emptyDir.medium=Memory' \
+        --set 'extraVolumeMounts[0].name=ev' --set 'extraVolumeMounts[0].mountPath=/ev' \
+        --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "name: ev" && echo "$out" | grep -q "mountPath: /ev"; then
+        pass "template Deployment has extraVolumes and mounts"
+    else
+        fail "template Deployment has extraVolumes and mounts"
+    fi
+
     # --- SHA256 password hashing ---
 
     # ACL inline user passwords are SHA256-hashed (# prefix, not > prefix)
@@ -3160,6 +3405,143 @@ test_template_render() {
         pass "template acl-init script uses sha256sum for existingPasswordSecret"
     else
         fail "template acl-init script uses sha256sum for existingPasswordSecret"
+    fi
+
+    # --- Secret generation (upstream parity) ---
+
+    # secret absent when existingSecret set
+    out=$(helm template test "$CHART_DIR" --set auth.existingSecret=my-ext-secret 2>&1)
+    if ! echo "$out" | grep -q "kind: Secret"; then
+        pass "template secret absent when existingSecret set"
+    else
+        fail "template secret absent when existingSecret set"
+    fi
+
+    # secret base64 encoding correctness (known password → known base64)
+    out=$(helm template test "$CHART_DIR" --set auth.password=hello123 --show-only templates/secret.yaml 2>&1)
+    local expected_b64
+    expected_b64=$(echo -n "hello123" | base64)
+    if echo "$out" | grep -q "$expected_b64"; then
+        pass "template secret base64 encoding correctness"
+    else
+        fail "template secret base64 encoding correctness"
+    fi
+
+    # secret has correct labels
+    out=$(helm template test "$CHART_DIR" --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "app.kubernetes.io/name: percona-valkey" && echo "$out" | grep -q "app.kubernetes.io/instance: test"; then
+        pass "template secret has correct labels"
+    else
+        fail "template secret has correct labels"
+    fi
+
+    # secret contains repl-user-password when ACL replicationUser configured
+    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS \
+        --set acl.enabled=true --set acl.replicationUser=repluser \
+        --set 'acl.users.repluser.password=replpass' \
+        --set 'acl.users.repluser.permissions=+replconf +psync +ping' \
+        --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "repl-user-password"; then
+        pass "template secret contains repl-user-password key"
+    else
+        fail "template secret contains repl-user-password key"
+    fi
+
+    # --- Init script ACL internals ---
+
+    # acl-init generates correct permission string in ACL line
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.myapp.password=apppass' \
+        --set 'acl.users.myapp.permissions=~* +@read' \
+        --show-only templates/secret.yaml 2>&1)
+    local acl_perm_b64
+    acl_perm_b64=$(echo "$out" | grep 'users.acl:' | awk '{print $2}' | tr -d '"')
+    local acl_perm_decoded
+    acl_perm_decoded=$(echo "$acl_perm_b64" | base64 -d 2>/dev/null)
+    if echo "$acl_perm_decoded" | grep -q 'user myapp on.*~\* +@read'; then
+        pass "template ACL permission string in users.acl"
+    else
+        fail "template ACL permission string in users.acl"
+    fi
+
+    # acl-init handles replicationUser password from existingPasswordSecret
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set acl.replicationUser=repluser \
+        --set 'acl.users.repluser.existingPasswordSecret=repl-secret' \
+        --set 'acl.users.repluser.passwordKey=repl-pw' \
+        --set 'acl.users.repluser.permissions=+replconf +psync +ping' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -q 'repl-secret' && echo "$out" | grep -q 'repl-pw'; then
+        pass "template acl-init replicationUser existingPasswordSecret"
+    else
+        fail "template acl-init replicationUser existingPasswordSecret"
+    fi
+
+    # acl config mounted read-only for restrictive permissions
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.app.password=p' --set 'acl.users.app.permissions=~* +@all' \
+        --show-only templates/statefulset.yaml 2>&1)
+    if echo "$out" | grep -A2 'acl-config' | grep -q 'readOnly: true'; then
+        pass "template ACL config mounted read-only"
+    else
+        fail "template ACL config mounted read-only"
+    fi
+
+    # configmap references aclfile when ACL enabled
+    out=$(helm template test "$CHART_DIR" \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.app.password=p' --set 'acl.users.app.permissions=~* +@all' \
+        --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "aclfile"; then
+        pass "template configmap references aclfile when ACL enabled"
+    else
+        fail "template configmap references aclfile when ACL enabled"
+    fi
+
+    # configmap has no aclfile when ACL disabled
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if ! echo "$out" | grep -q "aclfile"; then
+        pass "template configmap no aclfile when ACL disabled"
+    else
+        fail "template configmap no aclfile when ACL disabled"
+    fi
+
+    # --- Test hook pod rendering ---
+
+    # test-connection pod has hook-delete-policy
+    out=$(helm template test "$CHART_DIR" --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q 'helm.sh/hook-delete-policy'; then
+        pass "template test-connection hook-delete-policy"
+    else
+        fail "template test-connection hook-delete-policy"
+    fi
+
+    # test-connection pod has restartPolicy: Never
+    if echo "$out" | grep -q 'restartPolicy: Never'; then
+        pass "template test-connection restartPolicy Never"
+    else
+        fail "template test-connection restartPolicy Never"
+    fi
+
+    # test-connection pod uses TLS certs when tls.enabled
+    out=$(helm template test "$CHART_DIR" --set tls.enabled=true --set tls.existingSecret=my-tls \
+        --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q 'tls\|cacert'; then
+        pass "template test-connection TLS cert mount"
+    else
+        fail "template test-connection TLS cert mount"
+    fi
+
+    # test-connection pod command differs with auth disabled
+    out=$(helm template test "$CHART_DIR" --set auth.enabled=false \
+        --show-only templates/tests/test-connection.yaml 2>&1)
+    if echo "$out" | grep -q 'PING\|ping' && ! echo "$out" | grep -q 'VALKEY_PASSWORD\|AUTH'; then
+        pass "template test-connection no-auth command"
+    else
+        fail "template test-connection no-auth command"
     fi
 
     # --- Seccomp profile ---
