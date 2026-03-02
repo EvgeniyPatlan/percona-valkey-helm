@@ -796,6 +796,20 @@ test_template_render() {
         fail "template service default port 6379"
     fi
 
+    # service port name "valkey"
+    if echo "$out" | grep -q "name: valkey"; then
+        pass "template service port name valkey"
+    else
+        fail "template service port name valkey"
+    fi
+
+    # service port protocol TCP
+    if echo "$out" | grep -q "protocol: TCP"; then
+        pass "template service port protocol TCP"
+    else
+        fail "template service port protocol TCP"
+    fi
+
     # service selector labels
     out=$(helm template test "$CHART_DIR" --show-only templates/service.yaml 2>&1)
     if echo "$out" | grep -q "app.kubernetes.io/name: percona-valkey" && echo "$out" | grep -q "app.kubernetes.io/instance: test"; then
@@ -876,6 +890,46 @@ test_template_render() {
         pass "template read service selector targets all pods"
     else
         fail "template read service selector targets all pods"
+    fi
+
+    # --- Read service field-level tests ---
+
+    # read service default type ClusterIP
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "type: ClusterIP"; then
+        pass "template read service default type ClusterIP"
+    else
+        fail "template read service default type ClusterIP"
+    fi
+
+    # read service default port 6379 + protocol TCP
+    if echo "$out" | grep -q "port: 6379" && echo "$out" | grep -q "protocol: TCP"; then
+        pass "template read service default port 6379 protocol TCP"
+    else
+        fail "template read service default port 6379 protocol TCP"
+    fi
+
+    # read service port name "valkey"
+    if echo "$out" | grep -q "name: valkey"; then
+        pass "template read service port name valkey"
+    else
+        fail "template read service port name valkey"
+    fi
+
+    # read service custom clusterIP
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --set service.clusterIP=10.0.0.200 --show-only templates/service-read.yaml 2>&1)
+    if echo "$out" | grep -q "clusterIP: 10.0.0.200"; then
+        pass "template read service custom clusterIP"
+    else
+        fail "template read service custom clusterIP"
+    fi
+
+    # read service loadBalancerClass absent by default
+    out=$(helm template test "$CHART_DIR" --set standalone.replicas=2 --show-only templates/service-read.yaml 2>&1)
+    if ! echo "$out" | grep -q "loadBalancerClass"; then
+        pass "template read service loadBalancerClass absent by default"
+    else
+        fail "template read service loadBalancerClass absent by default"
     fi
 
     # headless service cluster-bus port in cluster mode
@@ -3378,6 +3432,78 @@ test_template_render() {
         fail "template Deployment has extraVolumes and mounts"
     fi
 
+    # Deployment no auth env when auth disabled
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set auth.enabled=false --show-only templates/deployment.yaml 2>&1)
+    if ! echo "$out" | grep -q "VALKEY_PASSWORD"; then
+        pass "template Deployment no auth env when auth disabled"
+    else
+        fail "template Deployment no auth env when auth disabled"
+    fi
+
+    # Deployment has ACL volumes when ACL enabled
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set acl.enabled=true --set auth.password=$PASS \
+        --set 'acl.users.app.password=x' --set 'acl.users.app.permissions=~* +@all' \
+        --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "acl-config"; then
+        pass "template Deployment has ACL volumes when ACL enabled"
+    else
+        fail "template Deployment has ACL volumes when ACL enabled"
+    fi
+
+    # Deployment no ACL volumes when ACL disabled
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --show-only templates/deployment.yaml 2>&1)
+    if ! echo "$out" | grep -q "acl-config"; then
+        pass "template Deployment no ACL volumes when ACL disabled"
+    else
+        fail "template Deployment no ACL volumes when ACL disabled"
+    fi
+
+    # Deployment has checksum annotation for rolling restart
+    if echo "$out" | grep -q "checksum/config"; then
+        pass "template Deployment has checksum annotation"
+    else
+        fail "template Deployment has checksum annotation"
+    fi
+
+    # Deployment pullPolicy propagates
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set image.pullPolicy=Always --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "imagePullPolicy: Always"; then
+        pass "template Deployment pullPolicy propagates"
+    else
+        fail "template Deployment pullPolicy propagates"
+    fi
+
+    # Deployment serviceAccountName
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "serviceAccountName: test-percona-valkey"; then
+        pass "template Deployment serviceAccountName"
+    else
+        fail "template Deployment serviceAccountName"
+    fi
+
+    # Deployment global.imageRegistry
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set global.imageRegistry=myregistry.io --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "image: myregistry.io/perconalab/valkey:"; then
+        pass "template Deployment global.imageRegistry"
+    else
+        fail "template Deployment global.imageRegistry"
+    fi
+
+    # Deployment with metrics sidecar
+    out=$(helm template test "$CHART_DIR" --set standalone.useDeployment=true --set persistence.enabled=false \
+        --set metrics.enabled=true --show-only templates/deployment.yaml 2>&1)
+    if echo "$out" | grep -q "oliver006/redis_exporter"; then
+        pass "template Deployment metrics sidecar image"
+    else
+        fail "template Deployment metrics sidecar image"
+    fi
+
     # --- SHA256 password hashing ---
 
     # ACL inline user passwords are SHA256-hashed (# prefix, not > prefix)
@@ -3507,6 +3633,58 @@ test_template_render() {
         pass "template configmap no aclfile when ACL disabled"
     else
         fail "template configmap no aclfile when ACL disabled"
+    fi
+
+    # --- Secret data keys and edge cases ---
+
+    # secret data keys complete (valkey-password + users.acl when ACL enabled)
+    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS \
+        --set acl.enabled=true --set 'acl.users.app.password=x' --set 'acl.users.app.permissions=~* +@all' \
+        --show-only templates/secret.yaml 2>&1)
+    if echo "$out" | grep -q "valkey-password:" && echo "$out" | grep -q "users.acl:"; then
+        pass "template secret has valkey-password and users.acl keys"
+    else
+        fail "template secret has valkey-password and users.acl keys"
+    fi
+
+    # secret users.acl only includes inline password users (not existingPasswordSecret users)
+    out=$(helm template test "$CHART_DIR" --set auth.password=$PASS \
+        --set acl.enabled=true \
+        --set 'acl.users.inlineuser.password=inpass' --set 'acl.users.inlineuser.permissions=~* +@all' \
+        --set 'acl.users.extuser.existingPasswordSecret=ext-secret' --set 'acl.users.extuser.passwordKey=pw' --set 'acl.users.extuser.permissions=+info' \
+        --show-only templates/secret.yaml 2>&1)
+    local mixed_acl_b64
+    mixed_acl_b64=$(echo "$out" | grep 'users.acl:' | awk '{print $2}' | tr -d '"')
+    local mixed_acl_decoded
+    mixed_acl_decoded=$(echo "$mixed_acl_b64" | base64 -d 2>/dev/null)
+    if echo "$mixed_acl_decoded" | grep -q 'user inlineuser' && ! echo "$mixed_acl_decoded" | grep -q 'user extuser'; then
+        pass "template secret users.acl only includes inline password users"
+    else
+        fail "template secret users.acl only includes inline password users"
+    fi
+
+    # --- ConfigMap internals ---
+
+    # configmap has correct metadata labels
+    out=$(helm template test "$CHART_DIR" --show-only templates/configmap.yaml 2>&1)
+    if echo "$out" | grep -q "app.kubernetes.io/name: percona-valkey" && echo "$out" | grep -q "app.kubernetes.io/instance: test" && echo "$out" | grep -q "app.kubernetes.io/managed-by: Helm"; then
+        pass "template configmap has correct metadata labels"
+    else
+        fail "template configmap has correct metadata labels"
+    fi
+
+    # configmap renders valid config when ACL disabled (has core directives)
+    if echo "$out" | grep -q "protected-mode" && echo "$out" | grep -q "port 6379" && echo "$out" | grep -q "dir /data"; then
+        pass "template configmap has core directives without ACL"
+    else
+        fail "template configmap has core directives without ACL"
+    fi
+
+    # configmap includes persistence directives by default
+    if echo "$out" | grep -q "save " && echo "$out" | grep -q "appendonly"; then
+        pass "template configmap includes persistence directives"
+    else
+        fail "template configmap includes persistence directives"
     fi
 
     # --- Test hook pod rendering ---
