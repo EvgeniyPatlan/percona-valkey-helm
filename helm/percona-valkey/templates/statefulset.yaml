@@ -316,7 +316,7 @@ spec:
               EXTRA_ARGS="$EXTRA_ARGS {{ .Values.config.extraFlags }}"
               {{- end }}
               if [ "$ORDINAL" != "0" ]; then
-                EXTRA_ARGS="$EXTRA_ARGS --replicaof {{ include "percona-valkey.fullname" . }}-0.{{ include "percona-valkey.fullname" . }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }} {{ .Values.service.port }}"
+                EXTRA_ARGS="$EXTRA_ARGS --replicaof {{ include "percona-valkey.fullname" . }}-0.{{ include "percona-valkey.fullname" . }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }} {{ ternary .Values.tls.port .Values.service.port .Values.tls.enabled }}"
               fi
               exec valkey-server /etc/valkey/valkey.conf $EXTRA_ARGS
           {{- else }}
@@ -686,10 +686,11 @@ spec:
             - |
               PASS_FILE="{{ .Values.auth.passwordFilePath }}/valkey-password"
               INTERVAL={{ .Values.auth.passwordRotation.interval }}
-              PORT={{ .Values.service.port }}
               {{- if .Values.tls.enabled }}
+              PORT={{ .Values.tls.port }}
               TLS_FLAGS="{{ include "percona-valkey.tlsCliFlags" . }}"
               {{- else }}
+              PORT={{ .Values.service.port }}
               TLS_FLAGS=""
               {{- end }}
 

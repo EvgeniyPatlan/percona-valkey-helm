@@ -2,7 +2,7 @@
 {{- $fullname := include "percona-valkey.fullname" . -}}
 {{- $replicas := int .Values.cluster.replicas -}}
 {{- $replicasPerPrimary := int .Values.cluster.replicasPerPrimary -}}
-{{- $port := int .Values.service.port -}}
+{{- $port := ternary (int .Values.tls.port) (int .Values.service.port) .Values.tls.enabled -}}
 apiVersion: batch/v1
 kind: Job
 metadata:

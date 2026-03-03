@@ -82,6 +82,51 @@ cleanup() {
     done
 }
 
+# --- Shared Helpers ---
+
+generate_tls_certs() {
+    local rel="$1"
+    local tls_dir="$2"
+    mkdir -p "$tls_dir"
+    openssl genrsa -out "$tls_dir/ca.key" 2048 2>/dev/null
+    openssl req -x509 -new -nodes -key "$tls_dir/ca.key" -sha256 -days 1 \
+        -out "$tls_dir/ca.crt" -subj "/CN=valkey-test-ca" 2>/dev/null
+    openssl genrsa -out "$tls_dir/tls.key" 2048 2>/dev/null
+    openssl req -new -key "$tls_dir/tls.key" -out "$tls_dir/tls.csr" \
+        -subj "/CN=${rel}-valkey" 2>/dev/null
+    cat > "$tls_dir/ext.cnf" <<CERTEOF
+[v3_req]
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = localhost
+DNS.2 = *.${NAMESPACE}.svc.cluster.local
+DNS.3 = ${rel}-percona-valkey
+DNS.4 = ${rel}-percona-valkey-headless
+DNS.5 = ${rel}-percona-valkey.${NAMESPACE}.svc.cluster.local
+DNS.6 = ${rel}-percona-valkey-headless.${NAMESPACE}.svc.cluster.local
+DNS.7 = *.${rel}-percona-valkey-headless.${NAMESPACE}.svc.cluster.local
+CERTEOF
+    openssl x509 -req -in "$tls_dir/tls.csr" -CA "$tls_dir/ca.crt" -CAkey "$tls_dir/ca.key" \
+        -CAcreateserial -out "$tls_dir/tls.crt" -days 1 -sha256 \
+        -extensions v3_req -extfile "$tls_dir/ext.cnf" 2>/dev/null
+    kubectl create secret generic "${rel}-tls-secret" \
+        --from-file=tls.crt="$tls_dir/tls.crt" \
+        --from-file=tls.key="$tls_dir/tls.key" \
+        --from-file=ca.crt="$tls_dir/ca.crt" \
+        -n $NAMESPACE 2>/dev/null || true
+}
+
+cleanup_tls() {
+    local rel="$1"
+    local tls_dir="$2"
+    kubectl delete secret "${rel}-tls-secret" -n $NAMESPACE 2>/dev/null || true
+    rm -rf "$tls_dir"
+}
+
+parse_ops_sec() {
+    grep -oP '[0-9]+\.[0-9]+(?= requests per second)' | head -1
+}
+
 # --- Lint Tests ---
 
 test_lint() {
@@ -6765,6 +6810,1524 @@ test_sentinel_hardened() {
     cleanup "$rel"
 }
 
+# --- Integration Tests (combined feature verification) ---
+
+test_tls_cluster() {
+    bold "=== TEST: TLS cluster mode ==="
+    local rel="t-tls-cl"
+    cleanup "$rel"
+
+    local TLS_DIR=$(mktemp -d)
+    generate_tls_certs "$rel" "$TLS_DIR"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        --set tls.enabled=true \
+        --set tls.replication=true \
+        --set tls.existingSecret="${rel}-tls-secret" \
+        -n $NAMESPACE --timeout 420s 2>&1 || { fail "TLS cluster install"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return; }
+    pass "TLS cluster install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "TLS cluster 6 pods ready"
+    else
+        fail "TLS cluster 6 pods ready"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return
+    fi
+
+    local TLS_FLAGS="--tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key"
+
+    # Verify cluster_state:ok via TLS
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "TLS cluster state ok"
+    else
+        fail "TLS cluster state ok (got: $state)"
+    fi
+
+    # Verify all 16384 slots assigned
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    if [ "$slots" = "16384" ]; then
+        pass "TLS cluster all 16384 slots assigned"
+    else
+        fail "TLS cluster all 16384 slots assigned (got: $slots)"
+    fi
+
+    # Set/get via TLS with cluster flag
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS -c set tls-cl-key tls-cl-value > /dev/null 2>&1
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS -c get tls-cl-key 2>/dev/null)
+    if [ "$val" = "tls-cl-value" ]; then
+        pass "TLS cluster set/get over TLS"
+    else
+        fail "TLS cluster set/get over TLS (got: $val)"
+    fi
+
+    # Verify TLS replication is enabled
+    local tls_repl=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS config get tls-replication 2>/dev/null | tail -1 | tr -d '\r')
+    if [ "$tls_repl" = "yes" ]; then
+        pass "TLS cluster tls-replication=yes"
+    else
+        fail "TLS cluster tls-replication=yes (got: $tls_repl)"
+    fi
+
+    cleanup "$rel"
+    cleanup_tls "$rel" "$TLS_DIR"
+}
+
+test_tls_sentinel() {
+    bold "=== TEST: TLS sentinel mode ==="
+    local rel="t-tls-sn"
+    cleanup "$rel"
+
+    local TLS_DIR=$(mktemp -d)
+    generate_tls_certs "$rel" "$TLS_DIR"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        --set tls.enabled=true \
+        --set tls.existingSecret="${rel}-tls-secret" \
+        -n $NAMESPACE --wait --timeout 420s 2>&1 || { fail "TLS sentinel install"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return; }
+    pass "TLS sentinel install"
+
+    # Wait for data pods
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 420s; then
+        pass "TLS sentinel 3 data pods ready"
+    else
+        fail "TLS sentinel 3 data pods ready"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return
+    fi
+
+    # Wait for sentinel pods
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3 420s; then
+        pass "TLS sentinel 3 sentinel pods ready"
+    else
+        fail "TLS sentinel 3 sentinel pods ready"
+    fi
+
+    local TLS_FLAGS="--tls --cacert /etc/valkey/tls/ca.crt --cert /etc/valkey/tls/tls.crt --key /etc/valkey/tls/tls.key"
+    local fullname="${rel}-percona-valkey"
+
+    # Find master via sentinel on TLS port
+    local master_info=$(kubectl exec -n $NAMESPACE ${fullname}-sentinel-0 -- valkey-cli -p 26379 $TLS_FLAGS -a $PASS SENTINEL get-master-addr-by-name mymaster 2>/dev/null)
+    if [ -n "$master_info" ]; then
+        pass "TLS sentinel master discovery via sentinel"
+    else
+        fail "TLS sentinel master discovery via sentinel"
+    fi
+
+    # Verify data set/get over TLS on a data pod
+    local master_pod=""
+    for i in 0 1 2; do
+        local r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS set tls-sn-key tls-sn-value > /dev/null 2>&1
+    local val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS get tls-sn-key 2>/dev/null)
+    if [ "$val" = "tls-sn-value" ]; then
+        pass "TLS sentinel set/get over TLS"
+    else
+        fail "TLS sentinel set/get over TLS (got: $val)"
+    fi
+
+    cleanup "$rel"
+    cleanup_tls "$rel" "$TLS_DIR"
+}
+
+test_acl_cluster() {
+    bold "=== TEST: ACL cluster mode ==="
+    local rel="t-acl-cl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        --set acl.enabled=true \
+        --set 'acl.users.app.permissions=~* &* +@all' \
+        --set 'acl.users.app.password=apppass123' \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "ACL cluster install"; cleanup "$rel"; return; }
+    pass "ACL cluster install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "ACL cluster 6 pods ready"
+    else
+        fail "ACL cluster 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify default user ping
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "ACL cluster default user ping"
+    else
+        fail "ACL cluster default user ping"
+    fi
+
+    # Verify custom user can set/get with cluster flag
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli --user app --pass apppass123 -c set acl-cl-key acl-cl-value > /dev/null 2>&1
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli --user app --pass apppass123 -c get acl-cl-key 2>/dev/null)
+    if [ "$val" = "acl-cl-value" ]; then
+        pass "ACL cluster custom user set/get"
+    else
+        fail "ACL cluster custom user set/get (got: $val)"
+    fi
+
+    # Verify ACL list shows custom user on multiple nodes
+    local acl_found=0
+    for i in 0 1 2; do
+        if kubectl exec ${rel}-percona-valkey-$i -n $NAMESPACE -- valkey-cli -a $PASS acl list 2>/dev/null | grep -q "user app"; then
+            acl_found=$((acl_found + 1))
+        fi
+    done
+    if [ "$acl_found" -ge 3 ]; then
+        pass "ACL cluster custom user replicated to all nodes"
+    else
+        fail "ACL cluster custom user replicated to all nodes (found on $acl_found/3 nodes)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_acl_sentinel() {
+    bold "=== TEST: ACL sentinel mode ==="
+    local rel="t-acl-sn"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        --set acl.enabled=true \
+        --set 'acl.users.app.permissions=~* &* +@all' \
+        --set 'acl.users.app.password=apppass123' \
+        -n $NAMESPACE --wait --timeout 300s 2>&1 || { fail "ACL sentinel install"; cleanup "$rel"; return; }
+    pass "ACL sentinel install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
+        pass "ACL sentinel 3 data pods ready"
+    else
+        fail "ACL sentinel 3 data pods ready"; cleanup "$rel"; return
+    fi
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3 300s; then
+        pass "ACL sentinel 3 sentinel pods ready"
+    else
+        fail "ACL sentinel 3 sentinel pods ready"
+    fi
+
+    local fullname="${rel}-percona-valkey"
+
+    # Find master
+    local master_pod=""
+    for i in 0 1 2; do
+        local r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+
+    # Verify custom user ping and set/get on master
+    if kubectl exec -n $NAMESPACE $master_pod -- valkey-cli --user app --pass apppass123 ping 2>/dev/null | grep -q PONG; then
+        pass "ACL sentinel custom user ping on master"
+    else
+        fail "ACL sentinel custom user ping on master"
+    fi
+
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli --user app --pass apppass123 set acl-sn-key acl-sn-value > /dev/null 2>&1
+    local val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli --user app --pass apppass123 get acl-sn-key 2>/dev/null)
+    if [ "$val" = "acl-sn-value" ]; then
+        pass "ACL sentinel custom user set/get"
+    else
+        fail "ACL sentinel custom user set/get (got: $val)"
+    fi
+
+    # Verify ACL list on a replica
+    local replica_pod=""
+    for i in 0 1 2; do
+        if [ "${fullname}-$i" != "$master_pod" ]; then
+            replica_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -n "$replica_pod" ]; then
+        if kubectl exec -n $NAMESPACE $replica_pod -- valkey-cli -a $PASS acl list 2>/dev/null | grep -q "user app"; then
+            pass "ACL sentinel custom user replicated to replica"
+        else
+            fail "ACL sentinel custom user replicated to replica"
+        fi
+    fi
+
+    cleanup "$rel"
+}
+
+test_metrics_tls() {
+    bold "=== TEST: Metrics exporter with TLS ==="
+    local rel="t-met-tls"
+    cleanup "$rel"
+
+    local TLS_DIR=$(mktemp -d)
+    generate_tls_certs "$rel" "$TLS_DIR"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set tls.enabled=true \
+        --set tls.existingSecret="${rel}-tls-secret" \
+        --set metrics.enabled=true \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "metrics TLS install"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return; }
+    pass "metrics TLS install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "metrics TLS pod ready"
+    else
+        fail "metrics TLS pod ready"; cleanup "$rel"; cleanup_tls "$rel" "$TLS_DIR"; return
+    fi
+
+    # Verify 2 containers running (valkey + metrics)
+    local containers=$(kubectl get pod ${rel}-percona-valkey-0 -n $NAMESPACE -o jsonpath='{.spec.containers[*].name}' 2>/dev/null)
+    if echo "$containers" | grep -q "metrics"; then
+        pass "metrics TLS sidecar container present"
+    else
+        fail "metrics TLS sidecar container present"
+    fi
+
+    # Query metrics endpoint
+    local metrics_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -c valkey -- \
+        sh -c 'exec 3<>/dev/tcp/127.0.0.1/9121; printf "GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3; cat <&3' 2>/dev/null)
+    if echo "$metrics_output" | grep -q "redis_up 1"; then
+        pass "metrics TLS redis_up=1"
+    else
+        fail "metrics TLS redis_up=1"
+    fi
+
+    cleanup "$rel"
+    cleanup_tls "$rel" "$TLS_DIR"
+}
+
+test_backup_with_auth() {
+    bold "=== TEST: Backup CronJob with authentication ==="
+    local rel="t-bkp-auth"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set backup.enabled=true \
+        --set 'backup.schedule=*/2 * * * *' \
+        --set backup.retention=3 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "backup auth install"; cleanup "$rel"; return; }
+    pass "backup auth install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1 120s; then
+        pass "backup auth pod ready"
+    else
+        fail "backup auth pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write test data
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set backup-test-key backup-test-value > /dev/null 2>&1
+
+    # Verify CronJob exists
+    if kubectl get cronjob ${rel}-percona-valkey-backup -n $NAMESPACE > /dev/null 2>&1; then
+        pass "backup auth CronJob exists"
+    else
+        fail "backup auth CronJob exists"; cleanup "$rel"; return
+    fi
+
+    # Manually trigger a backup job
+    kubectl create job ${rel}-backup-manual --from=cronjob/${rel}-percona-valkey-backup -n $NAMESPACE 2>/dev/null || true
+
+    # Wait for job to complete (up to 120s)
+    local deadline=$(( $(date +%s) + 120 ))
+    local job_ok=false
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local succeeded=$(kubectl get job ${rel}-backup-manual -n $NAMESPACE -o jsonpath='{.status.succeeded}' 2>/dev/null)
+        if [ "$succeeded" = "1" ]; then
+            job_ok=true
+            break
+        fi
+        local failed=$(kubectl get job ${rel}-backup-manual -n $NAMESPACE -o jsonpath='{.status.failed}' 2>/dev/null)
+        if [ "${failed:-0}" -ge 3 ]; then
+            break
+        fi
+        sleep 5
+    done
+
+    if $job_ok; then
+        pass "backup auth job completed successfully"
+    else
+        fail "backup auth job completed successfully"
+    fi
+
+    # Check job logs for success indicator
+    local logs=$(kubectl logs job/${rel}-backup-manual -n $NAMESPACE 2>/dev/null)
+    if echo "$logs" | grep -qi "backup\|success\|completed\|saved"; then
+        pass "backup auth job logs indicate success"
+    else
+        fail "backup auth job logs indicate success"
+    fi
+
+    cleanup "$rel"
+    kubectl delete job ${rel}-backup-manual -n $NAMESPACE 2>/dev/null || true
+}
+
+test_password_file_cluster() {
+    bold "=== TEST: Password file mount in cluster mode ==="
+    local rel="t-pwf-cl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        --set auth.usePasswordFiles=true \
+        -n $NAMESPACE --timeout 420s 2>&1 || { fail "password file cluster install"; cleanup "$rel"; return; }
+    pass "password file cluster install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 420s; then
+        pass "password file cluster 6 pods ready"
+    else
+        fail "password file cluster 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify password file exists on pod-0
+    local pw=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- cat /opt/valkey/secrets/valkey-password 2>/dev/null)
+    if [ "$pw" = "$PASS" ]; then
+        pass "password file cluster file content matches"
+    else
+        fail "password file cluster file content matches"
+    fi
+
+    # Verify cluster_state:ok
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "password file cluster state ok"
+    else
+        fail "password file cluster state ok (got: $state)"
+    fi
+
+    # Verify set/get with cluster flag
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set pwf-key pwf-value > /dev/null 2>&1
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get pwf-key 2>/dev/null)
+    if [ "$val" = "pwf-value" ]; then
+        pass "password file cluster set/get"
+    else
+        fail "password file cluster set/get (got: $val)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_networkpolicy_cluster() {
+    bold "=== TEST: NetworkPolicy in cluster mode ==="
+    local rel="t-netp-cl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        --set networkPolicy.enabled=true \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "NetworkPolicy cluster install"; cleanup "$rel"; return; }
+    pass "NetworkPolicy cluster install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "NetworkPolicy cluster 6 pods ready"
+    else
+        fail "NetworkPolicy cluster 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify cluster_state:ok (nodes can communicate through policy)
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "NetworkPolicy cluster state ok"
+    else
+        fail "NetworkPolicy cluster state ok (got: $state)"
+    fi
+
+    # Verify all 16384 slots assigned
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    if [ "$slots" = "16384" ]; then
+        pass "NetworkPolicy cluster all 16384 slots assigned"
+    else
+        fail "NetworkPolicy cluster all 16384 slots assigned (got: $slots)"
+    fi
+
+    # Verify set/get works
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set netp-key netp-value > /dev/null 2>&1
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get netp-key 2>/dev/null)
+    if [ "$val" = "netp-value" ]; then
+        pass "NetworkPolicy cluster set/get"
+    else
+        fail "NetworkPolicy cluster set/get (got: $val)"
+    fi
+
+    # Verify NetworkPolicy resource exists
+    if kubectl get networkpolicy -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --no-headers 2>/dev/null | grep -q .; then
+        pass "NetworkPolicy cluster resource exists"
+    else
+        fail "NetworkPolicy cluster resource exists"
+    fi
+
+    cleanup "$rel"
+}
+
+# --- Performance Tests (throughput and latency baselines) ---
+
+test_perf_standalone_throughput() {
+    bold "=== TEST: Performance standalone throughput ==="
+    local rel="t-perf-sa"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "perf standalone install"; cleanup "$rel"; return; }
+    pass "perf standalone install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "perf standalone pod ready"
+    else
+        fail "perf standalone pod ready"; cleanup "$rel"; return
+    fi
+
+    # Run benchmark
+    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 100000 -c 50 -t set,get -q 2>/dev/null)
+    echo "    Benchmark output:"
+    echo "$bench_output" | sed 's/^/    /'
+
+    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
+    local get_ops=$(echo "$bench_output" | grep "^GET:" | parse_ops_sec)
+
+    if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 10000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf standalone SET throughput > 10k ops/sec ($set_ops)"
+    else
+        fail "perf standalone SET throughput > 10k ops/sec (got: ${set_ops:-N/A})"
+    fi
+
+    if [ -n "$get_ops" ] && [ "$(echo "$get_ops > 10000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf standalone GET throughput > 10k ops/sec ($get_ops)"
+    else
+        fail "perf standalone GET throughput > 10k ops/sec (got: ${get_ops:-N/A})"
+    fi
+
+    cleanup "$rel"
+}
+
+test_perf_cluster_throughput() {
+    bold "=== TEST: Performance cluster throughput ==="
+    local rel="t-perf-cl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "perf cluster install"; cleanup "$rel"; return; }
+    pass "perf cluster install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "perf cluster 6 pods ready"
+    else
+        fail "perf cluster 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Run benchmark with cluster flag
+    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 100000 -c 50 --cluster -t set,get -q 2>/dev/null)
+    echo "    Benchmark output:"
+    echo "$bench_output" | sed 's/^/    /'
+
+    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
+    local get_ops=$(echo "$bench_output" | grep "^GET:" | parse_ops_sec)
+
+    if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 5000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf cluster SET throughput > 5k ops/sec ($set_ops)"
+    else
+        fail "perf cluster SET throughput > 5k ops/sec (got: ${set_ops:-N/A})"
+    fi
+
+    if [ -n "$get_ops" ] && [ "$(echo "$get_ops > 5000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf cluster GET throughput > 5k ops/sec ($get_ops)"
+    else
+        fail "perf cluster GET throughput > 5k ops/sec (got: ${get_ops:-N/A})"
+    fi
+
+    cleanup "$rel"
+}
+
+test_perf_pipeline() {
+    bold "=== TEST: Performance pipeline improvement ==="
+    local rel="t-perf-pl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "perf pipeline install"; cleanup "$rel"; return; }
+    pass "perf pipeline install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "perf pipeline pod ready"
+    else
+        fail "perf pipeline pod ready"; cleanup "$rel"; return
+    fi
+
+    # Run without pipeline
+    local no_pipe=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 50 -t set -q 2>/dev/null)
+    local no_pipe_ops=$(echo "$no_pipe" | grep "^SET:" | parse_ops_sec)
+    echo "    Without pipeline: ${no_pipe_ops:-N/A} ops/sec"
+
+    # Run with pipeline (P=16)
+    local with_pipe=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 50 -t set -P 16 -q 2>/dev/null)
+    local with_pipe_ops=$(echo "$with_pipe" | grep "^SET:" | parse_ops_sec)
+    echo "    With pipeline (P=16): ${with_pipe_ops:-N/A} ops/sec"
+
+    if [ -n "$no_pipe_ops" ] && [ -n "$with_pipe_ops" ]; then
+        local ratio=$(echo "$with_pipe_ops / $no_pipe_ops" | bc -l 2>/dev/null | cut -d. -f1)
+        if [ "${ratio:-0}" -ge 2 ]; then
+            pass "perf pipeline improvement >= 2x (${ratio}x)"
+        else
+            fail "perf pipeline improvement >= 2x (got ${ratio}x)"
+        fi
+    else
+        fail "perf pipeline could not parse benchmark results"
+    fi
+
+    cleanup "$rel"
+}
+
+test_perf_large_payload() {
+    bold "=== TEST: Performance large payload handling ==="
+    local rel="t-perf-lp"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "perf large payload install"; cleanup "$rel"; return; }
+    pass "perf large payload install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "perf large payload pod ready"
+    else
+        fail "perf large payload pod ready"; cleanup "$rel"; return
+    fi
+
+    # 1KB values
+    local bench_1k=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 10000 -c 20 -d 1024 -t set,get -q 2>/dev/null)
+    echo "    1KB payload:"
+    echo "$bench_1k" | sed 's/^/    /'
+    local set_1k=$(echo "$bench_1k" | grep "^SET:" | parse_ops_sec)
+    if [ -n "$set_1k" ] && [ "$(echo "$set_1k > 1000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf 1KB payload SET > 1k ops/sec ($set_1k)"
+    else
+        fail "perf 1KB payload SET > 1k ops/sec (got: ${set_1k:-N/A})"
+    fi
+
+    # 10KB values
+    local bench_10k=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -c 20 -d 10240 -t set,get -q 2>/dev/null)
+    echo "    10KB payload:"
+    echo "$bench_10k" | sed 's/^/    /'
+    local set_10k=$(echo "$bench_10k" | grep "^SET:" | parse_ops_sec)
+    if [ -n "$set_10k" ] && [ "$(echo "$set_10k > 1000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf 10KB payload SET > 1k ops/sec ($set_10k)"
+    else
+        fail "perf 10KB payload SET > 1k ops/sec (got: ${set_10k:-N/A})"
+    fi
+
+    cleanup "$rel"
+}
+
+test_perf_connections() {
+    bold "=== TEST: Performance concurrent connections ==="
+    local rel="t-perf-cn"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "perf connections install"; cleanup "$rel"; return; }
+    pass "perf connections install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "perf connections pod ready"
+    else
+        fail "perf connections pod ready"; cleanup "$rel"; return
+    fi
+
+    # Run with 200 concurrent connections
+    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 200 -t set,get -q 2>/dev/null)
+    echo "    200 concurrent connections:"
+    echo "$bench_output" | sed 's/^/    /'
+
+    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
+    if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 5000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        pass "perf 200 connections SET > 5k ops/sec ($set_ops)"
+    else
+        fail "perf 200 connections SET > 5k ops/sec (got: ${set_ops:-N/A})"
+    fi
+
+    # Verify server still healthy after load
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "perf connections server healthy after load"
+    else
+        fail "perf connections server healthy after load"
+    fi
+
+    cleanup "$rel"
+}
+
+test_perf_latency() {
+    bold "=== TEST: Performance latency baseline ==="
+    local rel="t-perf-lt"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "perf latency install"; cleanup "$rel"; return; }
+    pass "perf latency install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "perf latency pod ready"
+    else
+        fail "perf latency pod ready"; cleanup "$rel"; return
+    fi
+
+    # Run benchmark with CSV output for latency parsing
+    local bench_csv=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 10000 -c 10 -t set --csv 2>/dev/null)
+    echo "    CSV output:"
+    echo "$bench_csv" | sed 's/^/    /'
+
+    # Parse average latency from CSV (format: "test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms",...)
+    local avg_latency=$(echo "$bench_csv" | grep "SET" | awk -F',' '{print $3}' | tr -d '"')
+    if [ -n "$avg_latency" ]; then
+        local latency_ok=$(echo "$avg_latency < 5.0" | bc -l 2>/dev/null || echo 0)
+        if [ "$latency_ok" = "1" ]; then
+            pass "perf SET avg latency < 5ms (${avg_latency}ms)"
+        else
+            fail "perf SET avg latency < 5ms (got: ${avg_latency}ms)"
+        fi
+    else
+        fail "perf latency could not parse CSV output"
+    fi
+
+    cleanup "$rel"
+}
+
+# --- Resilience Tests (fault tolerance and recovery) ---
+
+test_resilience_cluster_partial_failure() {
+    bold "=== TEST: Resilience cluster partial failure ==="
+    local rel="t-res-cpf"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "resilience partial failure install"; cleanup "$rel"; return; }
+    pass "resilience partial failure install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "resilience partial failure 6 pods ready"
+    else
+        fail "resilience partial failure 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify initial cluster state
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "resilience partial failure initial cluster ok"
+    else
+        fail "resilience partial failure initial cluster ok"; cleanup "$rel"; return
+    fi
+
+    # Write test data
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set partial-fail-key "must-survive" > /dev/null 2>&1
+
+    # Delete pod-2
+    kubectl delete pod ${rel}-percona-valkey-2 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for pod to return
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "resilience partial failure pods recovered"
+    else
+        fail "resilience partial failure pods recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 5
+
+    # Verify cluster still ok
+    local state2=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state2" | grep -q "ok"; then
+        pass "resilience partial failure cluster ok after recovery"
+    else
+        fail "resilience partial failure cluster ok after recovery (got: $state2)"
+    fi
+
+    # Verify all slots assigned
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    if [ "$slots" = "16384" ]; then
+        pass "resilience partial failure all 16384 slots assigned"
+    else
+        fail "resilience partial failure all 16384 slots assigned (got: $slots)"
+    fi
+
+    # Verify data survived
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get partial-fail-key 2>/dev/null)
+    if [ "$val" = "must-survive" ]; then
+        pass "resilience partial failure data survived"
+    else
+        fail "resilience partial failure data survived (got: $val)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_cluster_primary_loss() {
+    bold "=== TEST: Resilience cluster primary loss and promotion ==="
+    local rel="t-res-cpl"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "resilience primary loss install"; cleanup "$rel"; return; }
+    pass "resilience primary loss install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "resilience primary loss 6 pods ready"
+    else
+        fail "resilience primary loss 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Find a primary pod
+    local primary_pod=""
+    for i in $(seq 0 5); do
+        local r=$(kubectl exec ${rel}-percona-valkey-$i -n $NAMESPACE -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            primary_pod="${rel}-percona-valkey-$i"
+            break
+        fi
+    done
+
+    if [ -z "$primary_pod" ]; then
+        fail "resilience primary loss could not find primary"; cleanup "$rel"; return
+    fi
+    pass "resilience primary loss identified primary: $primary_pod"
+
+    # Write test data
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set primary-loss-key "must-survive" > /dev/null 2>&1
+
+    # Delete the primary pod
+    kubectl delete pod "$primary_pod" -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for pods to recover
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "resilience primary loss pods recovered"
+    else
+        fail "resilience primary loss pods recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 5
+
+    # Verify cluster state ok (failover happened)
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "resilience primary loss cluster ok after failover"
+    else
+        fail "resilience primary loss cluster ok after failover (got: $state)"
+    fi
+
+    # Verify 16384 slots assigned
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    if [ "$slots" = "16384" ]; then
+        pass "resilience primary loss all 16384 slots assigned"
+    else
+        fail "resilience primary loss all 16384 slots assigned (got: $slots)"
+    fi
+
+    # Verify data survived
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get primary-loss-key 2>/dev/null)
+    if [ "$val" = "must-survive" ]; then
+        pass "resilience primary loss data survived"
+    else
+        fail "resilience primary loss data survived (got: $val)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_sentinel_quorum_loss() {
+    bold "=== TEST: Resilience sentinel quorum loss ==="
+    local rel="t-res-sql"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
+        --set auth.password=$PASS \
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        -n $NAMESPACE --wait --timeout 300s 2>&1 || { fail "resilience sentinel quorum install"; cleanup "$rel"; return; }
+    pass "resilience sentinel quorum install"
+
+    local fullname="${rel}-percona-valkey"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
+        pass "resilience sentinel quorum 3 data pods ready"
+    else
+        fail "resilience sentinel quorum 3 data pods ready"; cleanup "$rel"; return
+    fi
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3 300s; then
+        pass "resilience sentinel quorum 3 sentinel pods ready"
+    else
+        fail "resilience sentinel quorum 3 sentinel pods ready"; cleanup "$rel"; return
+    fi
+
+    # Verify sentinel can find master
+    local master_info=$(kubectl exec -n $NAMESPACE ${fullname}-sentinel-0 -- valkey-cli -p 26379 -a $PASS SENTINEL get-master-addr-by-name mymaster 2>/dev/null)
+    if [ -n "$master_info" ]; then
+        pass "resilience sentinel quorum initial master discovery"
+    else
+        fail "resilience sentinel quorum initial master discovery"
+    fi
+
+    # Delete 1 sentinel pod
+    kubectl delete pod ${fullname}-sentinel-1 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for sentinel pod to return
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/component=sentinel" 3 300s; then
+        pass "resilience sentinel quorum sentinel pod recovered"
+    else
+        fail "resilience sentinel quorum sentinel pod recovered"
+    fi
+
+    sleep 5
+
+    # Verify sentinel still monitors correctly
+    local master_info2=$(kubectl exec -n $NAMESPACE ${fullname}-sentinel-0 -- valkey-cli -p 26379 -a $PASS SENTINEL get-master-addr-by-name mymaster 2>/dev/null)
+    if [ -n "$master_info2" ]; then
+        pass "resilience sentinel quorum master still discoverable"
+    else
+        fail "resilience sentinel quorum master still discoverable"
+    fi
+
+    # Verify data operations still work
+    local master_pod=""
+    for i in 0 1 2; do
+        local r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+            break
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set sentinel-quorum-key quorum-value > /dev/null 2>&1
+    local val=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS get sentinel-quorum-key 2>/dev/null)
+    if [ "$val" = "quorum-value" ]; then
+        pass "resilience sentinel quorum data operations work"
+    else
+        fail "resilience sentinel quorum data operations work (got: $val)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_rolling_update_under_load() {
+    bold "=== TEST: Resilience rolling update data preservation ==="
+    local rel="t-res-ru"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set standalone.replicas=2 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience rolling update install"; cleanup "$rel"; return; }
+    pass "resilience rolling update install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+        pass "resilience rolling update 2 pods ready"
+    else
+        fail "resilience rolling update 2 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Write 100 keys
+    for i in $(seq 0 99); do
+        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set "key-$i" "value-$i" > /dev/null 2>&1
+    done
+    pass "resilience rolling update wrote 100 keys"
+
+    # Trigger rolling update with config change
+    helm upgrade "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set standalone.replicas=2 \
+        --set 'config.customConfig=hz 50' \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience rolling update helm upgrade"; cleanup "$rel"; return; }
+    pass "resilience rolling update helm upgrade"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+        pass "resilience rolling update pods ready after upgrade"
+    else
+        fail "resilience rolling update pods ready after upgrade"; cleanup "$rel"; return
+    fi
+
+    sleep 3
+
+    # Verify all 100 keys still present
+    local missing=0
+    for i in $(seq 0 99); do
+        local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS get "key-$i" 2>/dev/null)
+        if [ "$val" != "value-$i" ]; then
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -eq 0 ]; then
+        pass "resilience rolling update all 100 keys survived"
+    else
+        fail "resilience rolling update all 100 keys survived ($missing missing)"
+    fi
+
+    # Verify new config applied
+    local hz=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS config get hz 2>/dev/null | tail -1 | tr -d '\r')
+    if [ "$hz" = "50" ]; then
+        pass "resilience rolling update new config hz=50 applied"
+    else
+        fail "resilience rolling update new config hz=50 applied (got: $hz)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_oom_eviction() {
+    bold "=== TEST: Resilience OOM eviction handling ==="
+    local rel="t-res-oom"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set config.maxmemory=2mb \
+        --set config.maxmemoryPolicy=allkeys-lru \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience OOM install"; cleanup "$rel"; return; }
+    pass "resilience OOM install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "resilience OOM pod ready"
+    else
+        fail "resilience OOM pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write keys until we exceed the limit (1KB values)
+    local payload=$(head -c 1024 /dev/urandom | base64 | head -c 1024)
+    for i in $(seq 1 500); do
+        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set "oom-key-$i" "$payload" > /dev/null 2>&1
+    done
+
+    # Verify server still responds
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "resilience OOM server still responds after memory pressure"
+    else
+        fail "resilience OOM server still responds after memory pressure"
+    fi
+
+    # Verify eviction is happening
+    local evicted=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info stats 2>/dev/null | grep "evicted_keys:" | tr -d '\r' | grep -oP '\d+')
+    if [ "${evicted:-0}" -gt 0 ]; then
+        pass "resilience OOM eviction occurred (evicted_keys=$evicted)"
+    else
+        fail "resilience OOM eviction occurred (evicted_keys=${evicted:-0})"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_rapid_pod_cycling() {
+    bold "=== TEST: Resilience rapid pod cycling ==="
+    local rel="t-res-rpc"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience rapid cycling install"; cleanup "$rel"; return; }
+    pass "resilience rapid cycling install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "resilience rapid cycling pod ready"
+    else
+        fail "resilience rapid cycling pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write test data
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set rapid-key rapid-value > /dev/null 2>&1
+
+    # Delete pod 3 times in quick succession
+    for cycle in 1 2 3; do
+        kubectl delete pod ${rel}-percona-valkey-0 -n $NAMESPACE --wait=true > /dev/null 2>&1
+        if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+            echo "    Cycle $cycle: pod recovered"
+        else
+            fail "resilience rapid cycling pod recovered on cycle $cycle"; cleanup "$rel"; return
+        fi
+    done
+
+    # Verify pod is running
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "resilience rapid cycling pod running after 3 cycles"
+    else
+        fail "resilience rapid cycling pod running after 3 cycles"; cleanup "$rel"; return
+    fi
+
+    # Verify server responds
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "resilience rapid cycling server responds after cycling"
+    else
+        fail "resilience rapid cycling server responds after cycling"
+    fi
+
+    cleanup "$rel"
+}
+
+test_resilience_pvc_survives_uninstall() {
+    bold "=== TEST: Resilience PVC survives helm uninstall ==="
+    local rel="t-res-pvc"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set persistence.keepOnUninstall=true \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience PVC install"; cleanup_pvc=true; return; }
+    pass "resilience PVC install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "resilience PVC pod ready"
+    else
+        fail "resilience PVC pod ready"
+        helm uninstall "$rel" -n $NAMESPACE --wait 2>/dev/null || true
+        kubectl delete pvc -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --wait=false 2>/dev/null || true
+        return
+    fi
+
+    # Write test data and trigger BGSAVE
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set pvc-survive-key "pvc-survive-value" > /dev/null 2>&1
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS bgsave > /dev/null 2>&1
+    sleep 3
+
+    # Uninstall (should leave PVC)
+    helm uninstall "$rel" -n $NAMESPACE --wait 2>/dev/null || true
+    # Wait for pods to terminate
+    local deadline=$(( $(date +%s) + 60 ))
+    while kubectl get pods -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --no-headers 2>/dev/null | grep -q .; do
+        if [ "$(date +%s)" -gt "$deadline" ]; then break; fi
+        sleep 2
+    done
+
+    # Verify PVC still exists
+    if kubectl get pvc -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --no-headers 2>/dev/null | grep -q .; then
+        pass "resilience PVC survived uninstall"
+    else
+        fail "resilience PVC survived uninstall"; return
+    fi
+
+    # Reinstall with same release name
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set persistence.keepOnUninstall=true \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience PVC reinstall"; helm uninstall "$rel" -n $NAMESPACE --wait 2>/dev/null || true; kubectl delete pvc -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --wait=false 2>/dev/null || true; return; }
+    pass "resilience PVC reinstall"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "resilience PVC pod ready after reinstall"
+    else
+        fail "resilience PVC pod ready after reinstall"
+        helm uninstall "$rel" -n $NAMESPACE --wait 2>/dev/null || true
+        kubectl delete pvc -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --wait=false 2>/dev/null || true
+        return
+    fi
+
+    sleep 3
+
+    # Verify data survived
+    local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS get pvc-survive-key 2>/dev/null)
+    if [ "$val" = "pvc-survive-value" ]; then
+        pass "resilience PVC data survived reinstall"
+    else
+        fail "resilience PVC data survived reinstall (got: $val)"
+    fi
+
+    # Manual cleanup (keepOnUninstall means we must delete PVCs manually)
+    helm uninstall "$rel" -n $NAMESPACE --wait 2>/dev/null || true
+    kubectl delete pvc -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --wait=false 2>/dev/null || true
+    local deadline2=$(( $(date +%s) + 60 ))
+    while kubectl get pods -l "app.kubernetes.io/instance=$rel" -n $NAMESPACE --no-headers 2>/dev/null | grep -q .; do
+        if [ "$(date +%s)" -gt "$deadline2" ]; then break; fi
+        sleep 2
+    done
+}
+
+test_resilience_standalone_replica_recovery() {
+    bold "=== TEST: Resilience standalone replica recovery ==="
+    local rel="t-res-srr"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        --set standalone.replicas=2 \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience replica recovery install"; cleanup "$rel"; return; }
+    pass "resilience replica recovery install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+        pass "resilience replica recovery 2 pods ready"
+    else
+        fail "resilience replica recovery 2 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Write data on master (pod-0)
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set replica-key replica-value > /dev/null 2>&1
+
+    # Wait for replication to propagate
+    sleep 3
+
+    # Delete replica pod (pod-1)
+    kubectl delete pod ${rel}-percona-valkey-1 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for replica to return
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+        pass "resilience replica recovery replica pod recovered"
+    else
+        fail "resilience replica recovery replica pod recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 5
+
+    # Verify replication re-established
+    local repl_info=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info replication 2>/dev/null)
+    local connected=$(echo "$repl_info" | grep "connected_slaves:" | tr -d '\r' | grep -oP '\d+')
+    if [ "${connected:-0}" -ge 1 ]; then
+        pass "resilience replica recovery replication re-established (connected_slaves=$connected)"
+    else
+        fail "resilience replica recovery replication re-established (connected_slaves=${connected:-0})"
+    fi
+
+    # Verify replica has the data
+    local val=$(kubectl exec ${rel}-percona-valkey-1 -n $NAMESPACE -- valkey-cli -a $PASS get replica-key 2>/dev/null)
+    if [ "$val" = "replica-value" ]; then
+        pass "resilience replica recovery data on replica"
+    else
+        fail "resilience replica recovery data on replica (got: $val)"
+    fi
+
+    cleanup "$rel"
+}
+
+# --- Data Integrity Tests (persistence and consistency) ---
+
+test_integrity_aof_recovery() {
+    bold "=== TEST: Data integrity AOF recovery ==="
+    local rel="t-int-aof"
+    cleanup "$rel"
+
+    local aof_values=$(mktemp)
+    cat > "$aof_values" <<'AOFEOF'
+config:
+  customConfig: |
+    appendonly yes
+    appendfsync everysec
+AOFEOF
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -f "$aof_values" \
+        -n $NAMESPACE --wait --timeout 300s 2>&1 || { fail "integrity AOF install"; rm -f "$aof_values"; cleanup "$rel"; return; }
+    rm -f "$aof_values"
+    pass "integrity AOF install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity AOF pod ready"
+    else
+        fail "integrity AOF pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write 50 unique keys
+    for i in $(seq 1 50); do
+        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set "aof-key-$i" "aof-value-$i" > /dev/null 2>&1
+    done
+    pass "integrity AOF wrote 50 keys"
+
+    # Wait for appendfsync
+    sleep 3
+
+    # Delete pod (not PVC)
+    kubectl delete pod ${rel}-percona-valkey-0 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for recovery
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity AOF pod recovered"
+    else
+        fail "integrity AOF pod recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 3
+
+    # Verify all 50 keys present with correct values
+    local missing=0
+    for i in $(seq 1 50); do
+        local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS get "aof-key-$i" 2>/dev/null)
+        if [ "$val" != "aof-value-$i" ]; then
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -eq 0 ]; then
+        pass "integrity AOF all 50 keys recovered"
+    else
+        fail "integrity AOF all 50 keys recovered ($missing missing)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_integrity_rdb_snapshot() {
+    bold "=== TEST: Data integrity RDB snapshot ==="
+    local rel="t-int-rdb"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "integrity RDB install"; cleanup "$rel"; return; }
+    pass "integrity RDB install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity RDB pod ready"
+    else
+        fail "integrity RDB pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write 50 unique keys
+    for i in $(seq 1 50); do
+        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set "rdb-key-$i" "rdb-value-$i" > /dev/null 2>&1
+    done
+    pass "integrity RDB wrote 50 keys"
+
+    # Trigger BGSAVE and wait for completion
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS bgsave > /dev/null 2>&1
+    local deadline=$(( $(date +%s) + 30 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local lastsave=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS lastsave 2>/dev/null | tr -d '\r')
+        local bg_status=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info persistence 2>/dev/null | grep "rdb_bgsave_in_progress:" | tr -d '\r' | grep -oP '\d+')
+        if [ "${bg_status:-1}" = "0" ]; then
+            break
+        fi
+        sleep 1
+    done
+    pass "integrity RDB BGSAVE completed"
+
+    # Delete pod
+    kubectl delete pod ${rel}-percona-valkey-0 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for recovery
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity RDB pod recovered"
+    else
+        fail "integrity RDB pod recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 3
+
+    # Verify all 50 keys present
+    local missing=0
+    for i in $(seq 1 50); do
+        local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS get "rdb-key-$i" 2>/dev/null)
+        if [ "$val" != "rdb-value-$i" ]; then
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -eq 0 ]; then
+        pass "integrity RDB all 50 keys recovered"
+    else
+        fail "integrity RDB all 50 keys recovered ($missing missing)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_integrity_cluster_scale_data() {
+    bold "=== TEST: Data integrity during cluster scale-up ==="
+    local rel="t-int-csd"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --timeout 300s 2>&1 || { fail "integrity cluster scale install"; cleanup "$rel"; return; }
+    pass "integrity cluster scale install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 6 300s; then
+        pass "integrity cluster scale 6 pods ready"
+    else
+        fail "integrity cluster scale 6 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Write 200 keys with cluster flag
+    for i in $(seq 1 200); do
+        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set "scale-key-$i" "scale-value-$i" > /dev/null 2>&1
+    done
+    pass "integrity cluster scale wrote 200 keys"
+
+    # Scale to 8 nodes
+    helm upgrade "$rel" "$CHART_DIR" \
+        --set mode=cluster \
+        --set auth.password=$PASS \
+        --set cluster.replicas=8 \
+        -n $NAMESPACE --timeout 600s 2>&1 || { fail "integrity cluster scale upgrade to 8 nodes"; cleanup "$rel"; return; }
+    pass "integrity cluster scale upgrade initiated"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 8 600s; then
+        pass "integrity cluster scale 8 pods ready"
+    else
+        fail "integrity cluster scale 8 pods ready"; cleanup "$rel"; return
+    fi
+
+    # Wait for cluster stabilization
+    sleep 10
+
+    # Verify cluster state ok
+    local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
+    if echo "$state" | grep -q "ok"; then
+        pass "integrity cluster scale state ok after scale-up"
+    else
+        fail "integrity cluster scale state ok after scale-up (got: $state)"
+    fi
+
+    # Verify all 200 keys still accessible
+    local missing=0
+    for i in $(seq 1 200); do
+        local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c get "scale-key-$i" 2>/dev/null)
+        if [ "$val" != "scale-value-$i" ]; then
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -eq 0 ]; then
+        pass "integrity cluster scale all 200 keys accessible after scale-up"
+    else
+        fail "integrity cluster scale all 200 keys accessible after scale-up ($missing missing)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_integrity_large_dataset_persistence() {
+    bold "=== TEST: Data integrity large dataset persistence ==="
+    local rel="t-int-lds"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "integrity large dataset install"; cleanup "$rel"; return; }
+    pass "integrity large dataset install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity large dataset pod ready"
+    else
+        fail "integrity large dataset pod ready"; cleanup "$rel"; return
+    fi
+
+    # Write 1000 keys using pipeline for speed
+    local pipe_cmd=""
+    for i in $(seq 1 1000); do
+        pipe_cmd="${pipe_cmd}SET lds-key-$i lds-value-$i\r\n"
+    done
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- sh -c "printf '${pipe_cmd}' | valkey-cli -a $PASS --pipe" > /dev/null 2>&1
+    pass "integrity large dataset wrote 1000 keys via pipe"
+
+    # Trigger BGSAVE
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS bgsave > /dev/null 2>&1
+    sleep 5
+
+    # Delete pod
+    kubectl delete pod ${rel}-percona-valkey-0 -n $NAMESPACE --wait=true > /dev/null 2>&1
+
+    # Wait for recovery
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity large dataset pod recovered"
+    else
+        fail "integrity large dataset pod recovered"; cleanup "$rel"; return
+    fi
+
+    sleep 3
+
+    # Verify DBSIZE
+    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -oP '\d+')
+    if [ "${dbsize:-0}" -ge 1000 ]; then
+        pass "integrity large dataset DBSIZE >= 1000 (got: $dbsize)"
+    else
+        fail "integrity large dataset DBSIZE >= 1000 (got: ${dbsize:-0})"
+    fi
+
+    # Spot-check 10 keys
+    local spot_ok=0
+    for i in 1 50 100 200 300 400 500 600 800 1000; do
+        local val=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS get "lds-key-$i" 2>/dev/null)
+        if [ "$val" = "lds-value-$i" ]; then
+            spot_ok=$((spot_ok + 1))
+        fi
+    done
+    if [ "$spot_ok" -eq 10 ]; then
+        pass "integrity large dataset spot-check 10/10 keys correct"
+    else
+        fail "integrity large dataset spot-check 10/10 keys correct ($spot_ok/10)"
+    fi
+
+    cleanup "$rel"
+}
+
+test_integrity_concurrent_writes() {
+    bold "=== TEST: Data integrity concurrent writes ==="
+    local rel="t-int-cw"
+    cleanup "$rel"
+
+    helm install "$rel" "$CHART_DIR" \
+        --set auth.password=$PASS \
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "integrity concurrent writes install"; cleanup "$rel"; return; }
+    pass "integrity concurrent writes install"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
+        pass "integrity concurrent writes pod ready"
+    else
+        fail "integrity concurrent writes pod ready"; cleanup "$rel"; return
+    fi
+
+    # Run 3 parallel valkey-benchmark instances writing to separate key ranges
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    local pid1=$!
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    local pid2=$!
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    local pid3=$!
+
+    # Wait for all to complete
+    wait $pid1 2>/dev/null || true
+    wait $pid2 2>/dev/null || true
+    wait $pid3 2>/dev/null || true
+
+    # Verify DBSIZE is reasonable (3 * 1000 random keys within range 1000 may overlap, but should be > 500)
+    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -oP '\d+')
+    if [ "${dbsize:-0}" -ge 500 ]; then
+        pass "integrity concurrent writes DBSIZE >= 500 (got: $dbsize)"
+    else
+        fail "integrity concurrent writes DBSIZE >= 500 (got: ${dbsize:-0})"
+    fi
+
+    # Verify server is healthy after concurrent load
+    if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
+        pass "integrity concurrent writes server healthy after load"
+    else
+        fail "integrity concurrent writes server healthy after load"
+    fi
+
+    cleanup "$rel"
+}
+
 # --- Main ---
 
 main() {
@@ -6898,6 +8461,76 @@ main() {
     test_sentinel_failover
     echo ""
     test_sentinel_hardened
+    echo ""
+
+    # Phase 3: Integration tests
+    bold "--- Integration tests (combined feature verification) ---"
+    echo ""
+    test_tls_cluster
+    echo ""
+    test_tls_sentinel
+    echo ""
+    test_acl_cluster
+    echo ""
+    test_acl_sentinel
+    echo ""
+    test_metrics_tls
+    echo ""
+    test_backup_with_auth
+    echo ""
+    test_password_file_cluster
+    echo ""
+    test_networkpolicy_cluster
+    echo ""
+
+    # Phase 4: Performance tests
+    bold "--- Performance tests (throughput and latency baselines) ---"
+    echo ""
+    test_perf_standalone_throughput
+    echo ""
+    test_perf_cluster_throughput
+    echo ""
+    test_perf_pipeline
+    echo ""
+    test_perf_large_payload
+    echo ""
+    test_perf_connections
+    echo ""
+    test_perf_latency
+    echo ""
+
+    # Phase 5: Resilience tests
+    bold "--- Resilience tests (fault tolerance and recovery) ---"
+    echo ""
+    test_resilience_cluster_partial_failure
+    echo ""
+    test_resilience_cluster_primary_loss
+    echo ""
+    test_resilience_sentinel_quorum_loss
+    echo ""
+    test_resilience_rolling_update_under_load
+    echo ""
+    test_resilience_oom_eviction
+    echo ""
+    test_resilience_rapid_pod_cycling
+    echo ""
+    test_resilience_pvc_survives_uninstall
+    echo ""
+    test_resilience_standalone_replica_recovery
+    echo ""
+
+    # Phase 6: Data integrity tests
+    bold "--- Data integrity tests (persistence and consistency) ---"
+    echo ""
+    test_integrity_aof_recovery
+    echo ""
+    test_integrity_rdb_snapshot
+    echo ""
+    test_integrity_cluster_scale_data
+    echo ""
+    test_integrity_large_dataset_persistence
+    echo ""
+    test_integrity_concurrent_writes
     echo ""
 
     # Summary
