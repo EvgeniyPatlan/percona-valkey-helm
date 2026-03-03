@@ -124,7 +124,7 @@ cleanup_tls() {
 }
 
 parse_ops_sec() {
-    grep -oP '[0-9]+\.[0-9]+(?= requests per second)' | head -1
+    awk '/requests per second/ {print $2}' | head -1
 }
 
 # --- Lint Tests ---
@@ -7820,11 +7820,8 @@ test_resilience_oom_eviction() {
         fail "resilience OOM pod ready"; cleanup "$rel"; return
     fi
 
-    # Write keys until we exceed the limit (1KB values)
-    local payload=$(head -c 1024 /dev/urandom | base64 | head -c 1024)
-    for i in $(seq 1 500); do
-        kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set "oom-key-$i" "$payload" > /dev/null 2>&1
-    done
+    # Write enough data to exceed 2MB maxmemory (5000 keys * 1KB = ~5MB)
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -r 5000 -d 1024 -t set -q > /dev/null 2>&1
 
     # Verify server still responds
     if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
@@ -7834,7 +7831,7 @@ test_resilience_oom_eviction() {
     fi
 
     # Verify eviction is happening
-    local evicted=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info stats 2>/dev/null | grep "evicted_keys:" | tr -d '\r' | grep -oP '\d+')
+    local evicted=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info stats 2>/dev/null | grep "evicted_keys:" | tr -d '\r' | awk -F: '{print $2}')
     if [ "${evicted:-0}" -gt 0 ]; then
         pass "resilience OOM eviction occurred (evicted_keys=$evicted)"
     else
@@ -7898,7 +7895,7 @@ test_resilience_pvc_survives_uninstall() {
     helm install "$rel" "$CHART_DIR" \
         --set auth.password=$PASS \
         --set persistence.keepOnUninstall=true \
-        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience PVC install"; cleanup_pvc=true; return; }
+        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience PVC install"; cleanup "$rel"; return; }
     pass "resilience PVC install"
 
     if wait_for_pods "app.kubernetes.io/instance=$rel" 1; then
@@ -7968,33 +7965,55 @@ test_resilience_pvc_survives_uninstall() {
 }
 
 test_resilience_standalone_replica_recovery() {
-    bold "=== TEST: Resilience standalone replica recovery ==="
+    bold "=== TEST: Resilience sentinel replica recovery ==="
     local rel="t-res-srr"
     cleanup "$rel"
 
     helm install "$rel" "$CHART_DIR" \
+        --set mode=sentinel \
         --set auth.password=$PASS \
-        --set standalone.replicas=2 \
-        -n $NAMESPACE --wait --timeout $TIMEOUT 2>&1 || { fail "resilience replica recovery install"; cleanup "$rel"; return; }
+        --set sentinel.replicas=3 \
+        --set sentinel.sentinelReplicas=3 \
+        -n $NAMESPACE --wait --timeout 300s 2>&1 || { fail "resilience replica recovery install"; cleanup "$rel"; return; }
     pass "resilience replica recovery install"
 
-    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
-        pass "resilience replica recovery 2 pods ready"
+    local fullname="${rel}-percona-valkey"
+
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
+        pass "resilience replica recovery 3 data pods ready"
     else
-        fail "resilience replica recovery 2 pods ready"; cleanup "$rel"; return
+        fail "resilience replica recovery 3 data pods ready"; cleanup "$rel"; return
     fi
 
-    # Write data on master (pod-0)
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS set replica-key replica-value > /dev/null 2>&1
+    # Find master
+    local master_pod=""
+    local replica_pod=""
+    for i in 0 1 2; do
+        local r=$(kubectl exec -n $NAMESPACE ${fullname}-$i -- valkey-cli -a $PASS role 2>/dev/null | head -1)
+        if echo "$r" | grep -qi "^master"; then
+            master_pod="${fullname}-$i"
+        elif [ -z "$replica_pod" ]; then
+            replica_pod="${fullname}-$i"
+        fi
+    done
+    if [ -z "$master_pod" ]; then
+        master_pod="${fullname}-0"
+    fi
+    if [ -z "$replica_pod" ]; then
+        replica_pod="${fullname}-1"
+    fi
+
+    # Write data on master
+    kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS set replica-key replica-value > /dev/null 2>&1
 
     # Wait for replication to propagate
     sleep 3
 
-    # Delete replica pod (pod-1)
-    kubectl delete pod ${rel}-percona-valkey-1 -n $NAMESPACE --wait=true > /dev/null 2>&1
+    # Delete replica pod
+    kubectl delete pod $replica_pod -n $NAMESPACE --wait=true > /dev/null 2>&1
 
     # Wait for replica to return
-    if wait_for_pods "app.kubernetes.io/instance=$rel" 2; then
+    if wait_for_pods "app.kubernetes.io/instance=$rel,app.kubernetes.io/name=percona-valkey" 3 300s; then
         pass "resilience replica recovery replica pod recovered"
     else
         fail "resilience replica recovery replica pod recovered"; cleanup "$rel"; return
@@ -8002,17 +8021,17 @@ test_resilience_standalone_replica_recovery() {
 
     sleep 5
 
-    # Verify replication re-established
-    local repl_info=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info replication 2>/dev/null)
-    local connected=$(echo "$repl_info" | grep "connected_slaves:" | tr -d '\r' | grep -oP '\d+')
-    if [ "${connected:-0}" -ge 1 ]; then
+    # Verify replication re-established on master
+    local repl_info=$(kubectl exec -n $NAMESPACE $master_pod -- valkey-cli -a $PASS info replication 2>/dev/null)
+    local connected=$(echo "$repl_info" | grep "connected_slaves:" | tr -d '\r' | awk -F: '{print $2}')
+    if [ "${connected:-0}" -ge 2 ]; then
         pass "resilience replica recovery replication re-established (connected_slaves=$connected)"
     else
         fail "resilience replica recovery replication re-established (connected_slaves=${connected:-0})"
     fi
 
     # Verify replica has the data
-    local val=$(kubectl exec ${rel}-percona-valkey-1 -n $NAMESPACE -- valkey-cli -a $PASS get replica-key 2>/dev/null)
+    local val=$(kubectl exec -n $NAMESPACE $replica_pod -- valkey-cli -a $PASS get replica-key 2>/dev/null)
     if [ "$val" = "replica-value" ]; then
         pass "resilience replica recovery data on replica"
     else

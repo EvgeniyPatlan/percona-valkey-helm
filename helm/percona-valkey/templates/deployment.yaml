@@ -175,7 +175,7 @@ spec:
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           {{- $passCmd := "$VALKEY_PASSWORD" }}
-          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
           {{- $passCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
           {{- end }}
           livenessProbe:

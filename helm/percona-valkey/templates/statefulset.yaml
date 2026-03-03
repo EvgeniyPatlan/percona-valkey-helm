@@ -387,7 +387,7 @@ spec:
                   - -c
                   - |
                     {{- if .Values.auth.enabled }}
-                    {{- if .Values.auth.passwordRotation.enabled }}
+                    {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
                     AUTH="-a $(cat {{ .Values.auth.passwordFilePath }}/valkey-password)"
                     {{- else }}
                     AUTH="-a $VALKEY_PASSWORD"
@@ -423,7 +423,7 @@ spec:
                   - -c
                   - |
                     {{- if .Values.auth.enabled }}
-                    {{- if .Values.auth.passwordRotation.enabled }}
+                    {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
                     AUTH="-a $(cat {{ .Values.auth.passwordFilePath }}/valkey-password)"
                     {{- else }}
                     AUTH="-a $VALKEY_PASSWORD"
@@ -455,7 +455,7 @@ spec:
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           {{- $passCmd := "$VALKEY_PASSWORD" }}
-          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
           {{- $passCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
           {{- end }}
           livenessProbe:
@@ -488,7 +488,7 @@ spec:
           {{- $tlsProbeFlags = printf "-p %d --tls --cacert %s/%s --cert %s/%s --key %s/%s" (int .Values.tls.port) .Values.tls.certMountPath .Values.tls.caKey .Values.tls.certMountPath .Values.tls.certKey .Values.tls.certMountPath .Values.tls.keyKey }}
           {{- end }}
           {{- $readyPassCmd := "$VALKEY_PASSWORD" }}
-          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
           {{- $readyPassCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
           {{- end }}
           readinessProbe:
@@ -519,7 +519,7 @@ spec:
           {{- end }}
           {{- if .Values.startupProbe.enabled }}
           {{- $startPassCmd := "$VALKEY_PASSWORD" }}
-          {{- if .Values.auth.passwordRotation.enabled }}
+          {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
           {{- $startPassCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
           {{- end }}
           startupProbe:

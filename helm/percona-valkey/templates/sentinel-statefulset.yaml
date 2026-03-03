@@ -191,6 +191,10 @@ spec:
                   key: valkey-password
             {{- end }}
           {{- end }}
+          {{- $sentPassCmd := "$VALKEY_PASSWORD" }}
+          {{- if or .Values.auth.usePasswordFiles .Values.auth.passwordRotation.enabled }}
+          {{- $sentPassCmd = printf "$(cat %s/valkey-password)" .Values.auth.passwordFilePath }}
+          {{- end }}
           livenessProbe:
             exec:
               command:
@@ -199,12 +203,12 @@ spec:
                 - |
                   {{- if .Values.tls.enabled }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "{{ $sentPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "{{ $sentPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} ping )
                   {{- end }}
@@ -222,12 +226,12 @@ spec:
                 - |
                   {{- if .Values.tls.enabled }}
                   {{- if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} -a "{{ $sentPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} --tls --cacert {{ .Values.tls.certMountPath }}/{{ .Values.tls.caKey }} --cert {{ .Values.tls.certMountPath }}/{{ .Values.tls.certKey }} --key {{ .Values.tls.certMountPath }}/{{ .Values.tls.keyKey }} ping )
                   {{- end }}
                   {{- else if .Values.auth.enabled }}
-                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "$VALKEY_PASSWORD" ping )
+                  response=$(valkey-cli -p {{ .Values.sentinel.port }} -a "{{ $sentPassCmd }}" ping )
                   {{- else }}
                   response=$(valkey-cli -p {{ .Values.sentinel.port }} ping )
                   {{- end }}
