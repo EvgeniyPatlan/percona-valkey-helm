@@ -6846,7 +6846,7 @@ test_tls_cluster() {
     fi
 
     # Verify all 16384 slots assigned
-    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -p 6380 $TLS_FLAGS -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -o '[0-9]*')
     if [ "$slots" = "16384" ]; then
         pass "TLS cluster all 16384 slots assigned"
     else
@@ -7253,7 +7253,7 @@ test_networkpolicy_cluster() {
     fi
 
     # Verify all 16384 slots assigned
-    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -o '[0-9]*')
     if [ "$slots" = "16384" ]; then
         pass "NetworkPolicy cluster all 16384 slots assigned"
     else
@@ -7567,7 +7567,7 @@ test_resilience_cluster_partial_failure() {
     fi
 
     # Verify all slots assigned
-    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -o '[0-9]*')
     if [ "$slots" = "16384" ]; then
         pass "resilience partial failure all 16384 slots assigned"
     else
@@ -7641,7 +7641,7 @@ test_resilience_cluster_primary_loss() {
     fi
 
     # Verify 16384 slots assigned
-    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -oP '\d+')
+    local slots=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_slots_ok | tr -d '\r' | grep -o '[0-9]*')
     if [ "$slots" = "16384" ]; then
         pass "resilience primary loss all 16384 slots assigned"
     else
@@ -7821,7 +7821,7 @@ test_resilience_oom_eviction() {
     fi
 
     # Write enough data to exceed 2MB maxmemory (5000 keys * 1KB = ~5MB)
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -r 5000 -d 1024 -t set -q > /dev/null 2>&1
+    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -r 5000 -d 1024 -t set -q > /dev/null 2>&1 || true
 
     # Verify server still responds
     if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
@@ -8133,7 +8133,7 @@ test_integrity_rdb_snapshot() {
     local deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local lastsave=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS lastsave 2>/dev/null | tr -d '\r')
-        local bg_status=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info persistence 2>/dev/null | grep "rdb_bgsave_in_progress:" | tr -d '\r' | grep -oP '\d+')
+        local bg_status=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS info persistence 2>/dev/null | grep "rdb_bgsave_in_progress:" | tr -d '\r' | grep -o '[0-9]*')
         if [ "${bg_status:-1}" = "0" ]; then
             break
         fi
@@ -8276,7 +8276,7 @@ test_integrity_large_dataset_persistence() {
     sleep 3
 
     # Verify DBSIZE
-    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -oP '\d+')
+    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -o '[0-9]*')
     if [ "${dbsize:-0}" -ge 1000 ]; then
         pass "integrity large dataset DBSIZE >= 1000 (got: $dbsize)"
     else
@@ -8330,7 +8330,7 @@ test_integrity_concurrent_writes() {
     wait $pid3 2>/dev/null || true
 
     # Verify DBSIZE is reasonable (3 * 1000 random keys within range 1000 may overlap, but should be > 500)
-    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -oP '\d+')
+    local dbsize=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS dbsize 2>/dev/null | grep -o '[0-9]*')
     if [ "${dbsize:-0}" -ge 500 ]; then
         pass "integrity concurrent writes DBSIZE >= 500 (got: $dbsize)"
     else
