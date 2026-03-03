@@ -37,7 +37,7 @@ helm/percona-valkey/
 ├── values.yaml                           # All configurable parameters
 ├── values.schema.json                    # JSON Schema for values validation
 ├── .helmignore                           # Files excluded from chart packaging
-├── test-chart.sh                         # Comprehensive lint/render/deploy test suite
+├── test-chart.sh                         # Comprehensive test suite (~8500 lines, 76 tests)
 └── templates/
     ├── _helpers.tpl                      # Template helpers, validators, resource presets
     ├── NOTES.txt                         # Post-install connection instructions
@@ -383,7 +383,7 @@ When the hardened variant is selected, the chart automatically:
 | `auth.enabled` | Enable password authentication | `true` |
 | `auth.password` | Valkey password (auto-generated 16-char if empty) | `""` |
 | `auth.existingSecret` | Use existing Secret (must contain key `valkey-password`) | `""` |
-| `auth.usePasswordFiles` | Mount password as file instead of env var | `false` |
+| `auth.usePasswordFiles` | Mount password as file instead of env var (probes and hooks read from file) | `false` |
 | `auth.passwordFilePath` | Directory where password file is mounted | `/opt/valkey/secrets` |
 | `auth.passwordRotation.enabled` | Enable hot-reload password rotation sidecar | `false` |
 | `auth.passwordRotation.interval` | Poll interval in seconds | `10` |
@@ -714,6 +714,17 @@ tls:
 ```
 
 This propagates consistently to all templates: volumes, configmaps, probes, CLI flags, and lifecycle hooks.
+
+### TLS Port Selection
+
+When `tls.enabled=true`, all internal components automatically use the TLS port (`tls.port`, default 6380):
+- Cluster Jobs (init, precheck, scale) use `ternary` to select the correct port
+- Sentinel `monitor` directive monitors the master on the TLS port
+- Sentinel `wait-for-master` init container pings via TLS
+- Replica `--replicaof` uses the TLS port for replication
+- Password rotation sidecar connects via TLS
+
+**Sentinel mode:** When TLS is enabled, sentinel processes always disable the plaintext port (`port 0`) and use only `tls-port 26379`, regardless of the `tls.disablePlaintext` setting. All sentinel probes and init containers use TLS flags unconditionally.
 
 ### cert-manager Integration
 
@@ -1400,11 +1411,15 @@ helm template test ./helm/percona-valkey/ | kubectl apply --dry-run=client -f -
 bash ./helm/percona-valkey/test-chart.sh
 ```
 
-The test suite includes:
-- **Lint tests**: All modes, variants, and feature combinations
-- **Template render tests**: Validates rendered YAML for every feature
-- **Deployment tests**: Full install/upgrade/test/uninstall cycles
+The test suite (~8500 lines, 76 test functions) includes:
+- **Lint tests** (28+): All modes, variants, and feature combinations
+- **Template render tests** (~342 assertions): Validates rendered YAML for every feature
+- **Deployment tests** (40+): Full install/upgrade/test/uninstall cycles
 - **Validation tests**: Ensures invalid configurations fail with clear errors
+- **Integration tests** (8): Combined feature verification (TLS+cluster, ACL+sentinel, metrics+TLS, password files+cluster, NetworkPolicy+cluster)
+- **Performance tests** (6): Throughput and latency baselines using `valkey-benchmark` (standalone, cluster, pipeline, large payload, high concurrency, latency)
+- **Resilience tests** (8): Fault tolerance and recovery (pod kill, primary loss, sentinel quorum loss, rolling update data preservation, OOM eviction, rapid pod cycling, PVC survival, replica recovery)
+- **Data integrity tests** (5): Persistence and consistency (AOF recovery, RDB snapshot, cluster scale data preservation, large dataset persistence, concurrent writes)
 
 ### Run the connection test after install
 

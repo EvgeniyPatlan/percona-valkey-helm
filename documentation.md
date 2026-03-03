@@ -64,7 +64,7 @@ percona-valkey-helm/
     values.yaml                         # Default configuration values
     .helmignore                         # Files to ignore during packaging
     values.schema.json                  # JSON Schema for values validation
-    test-chart.sh                       # Comprehensive test suite (6300+ lines)
+    test-chart.sh                       # Comprehensive test suite (~8500 lines)
     templates/
       _helpers.tpl                      # 27 named template helpers
       NOTES.txt                         # Post-install instructions
@@ -424,6 +424,8 @@ The chart provides flexible password authentication for Valkey.
 When `auth.usePasswordFiles: true`:
 - Password is mounted as a file at `<passwordFilePath>/valkey-password` (default: `/opt/valkey/secrets/valkey-password`)
 - `VALKEY_PASSWORD_FILE` environment variable is set instead of `VALKEY_PASSWORD`
+- All health probes (liveness, readiness, startup) and preStop hooks read the password from the file using `$(cat <path>/valkey-password)` instead of referencing the `$VALKEY_PASSWORD` env var
+- Sentinel probes also use file-based password when `usePasswordFiles` is enabled
 - More secure than environment variables (not visible in `kubectl describe pod`)
 
 #### Configuration
@@ -553,13 +555,15 @@ Full TLS/SSL encryption for client connections, replication, and cluster communi
 
 #### Dual-Port Mode (Default)
 
-By default, TLS runs alongside plaintext:
+By default, TLS runs alongside plaintext for data pods (standalone/cluster):
 - Plaintext port: 6379
 - TLS port: 6380 (configurable)
 
+**Sentinel mode exception:** When TLS is enabled, sentinel processes always set `port 0` (disable plaintext) and use only `tls-port 26379`. This is because the sentinel configuration unconditionally disables the plaintext port when TLS is active, regardless of the `tls.disablePlaintext` setting. All sentinel probes, init containers, and monitoring commands use TLS when `tls.enabled=true`.
+
 #### Plaintext Disabled Mode
 
-When `tls.disablePlaintext: true`, the plaintext port is set to 0 in valkey.conf, forcing all connections through TLS.
+When `tls.disablePlaintext: true`, the plaintext port is set to 0 in valkey.conf, forcing all data pod connections through TLS. Health probes, preStop hooks, and all internal communication switch to the TLS port with `--tls` flags.
 
 #### TLS in valkey.conf
 
@@ -622,14 +626,17 @@ kubectl create secret generic my-dh-params --from-file=dhparams.pem
 
 #### TLS-Aware Components
 
-All chart components support TLS when enabled:
-- Health probes (liveness, readiness, startup)
+All chart components correctly select the TLS port (`tls.port`, default 6380) when TLS is enabled:
+- Health probes (liveness, readiness, startup) — use TLS port when `tls.disablePlaintext=true` (data pods) or always when TLS is enabled (sentinel pods)
 - Graceful failover preStop hooks
-- Cluster Jobs (init, precheck, scale)
+- Cluster Jobs (init, precheck, scale) — use `ternary` to select TLS or plaintext port
+- Sentinel `monitor` directive — uses TLS port to monitor the master
+- Sentinel `wait-for-master` init container — pings master via TLS
+- Replica `--replicaof` — uses TLS port for replication
 - Backup CronJob
 - Test connection pod
 - Metrics exporter (uses `rediss://` protocol)
-- Sentinel init containers and probes
+- Password rotation sidecar
 
 #### Certificate Sources
 
@@ -854,7 +861,7 @@ valkey-cli $AUTH shutdown nosave || true
 Both hooks:
 - Poll every 0.5 seconds for up to 20 iterations (10-second timeout) waiting for demotion
 - Support TLS flags (`-p <tls-port> --tls --cacert ... --cert ... --key ...`) when `tls.disablePlaintext` is enabled
-- Support password rotation (`cat <password-file>`) or standard `$VALKEY_PASSWORD` env var
+- Support password files (`cat <password-file>`) when `auth.usePasswordFiles` or `auth.passwordRotation` is enabled, otherwise use `$VALKEY_PASSWORD` env var
 - Use only shell builtins (`case`/`esac`) for pattern matching, making them compatible with hardened images
 - End with `shutdown nosave` to prevent unnecessary disk writes during planned termination
 
@@ -2321,7 +2328,7 @@ The test pod:
 
 ## 9. Test Suite Documentation
 
-The chart includes a comprehensive test suite in `test-chart.sh` (6300+ lines) covering lint tests, template rendering tests, and live deployment tests.
+The chart includes a comprehensive test suite in `test-chart.sh` (~8500 lines) covering lint tests, template rendering tests, live deployment tests, integration tests, performance benchmarks, resilience tests, and data integrity tests.
 
 ### 9.1 Test Framework Overview
 
@@ -2333,15 +2340,26 @@ test-chart.sh
   │   ├── green(), red(), yellow(), bold()  — colored output
   │   ├── pass(), fail(), skip()            — test result tracking
   │   ├── wait_for_pods()                   — pod readiness polling
-  │   └── cleanup()                         — release + PVC cleanup
+  │   ├── cleanup()                         — release + PVC cleanup
+  │   ├── generate_tls_certs()              — shared TLS cert generation
+  │   ├── cleanup_tls()                     — TLS cert/secret cleanup
+  │   └── parse_ops_sec()                   — extract ops/sec from benchmarks
   ├── Phase 1: Static Tests
   │   ├── test_lint()                       — helm lint validation
   │   └── test_template_render()            — helm template assertions
-  └── Phase 2: Deployment Tests
-      ├── Standalone tests
-      ├── Cluster tests
-      ├── Sentinel tests
-      └── Feature-specific tests
+  ├── Phase 2: Deployment Tests
+  │   ├── Standalone tests
+  │   ├── Cluster tests
+  │   ├── Sentinel tests
+  │   └── Feature-specific tests
+  ├── Phase 3: Integration Tests
+  │   └── Combined feature verification (TLS+cluster, ACL+sentinel, etc.)
+  ├── Phase 4: Performance Tests
+  │   └── Throughput and latency baselines (valkey-benchmark)
+  ├── Phase 5: Resilience Tests
+  │   └── Fault tolerance and recovery (pod kills, failover, OOM)
+  └── Phase 6: Data Integrity Tests
+      └── Persistence and consistency (AOF, RDB, concurrent writes)
 ```
 
 #### Test Counters
@@ -2363,6 +2381,18 @@ test-chart.sh
 - `helm uninstall <release>` (ignores errors)
 - Deletes PVCs matching the release label
 - Waits up to 60 seconds for pods to terminate
+
+**`generate_tls_certs(release, tls_dir)`**
+- Generates a self-signed CA + server certificate with SAN entries for the release
+- Creates a Kubernetes TLS Secret (`<release>-tls-secret`) from the generated certs
+- SAN covers `localhost`, headless service wildcard, and all pod DNS names
+
+**`cleanup_tls(release, tls_dir)`**
+- Deletes the TLS Secret and removes the local certificate directory
+
+**`parse_ops_sec()`**
+- Piped filter that extracts ops/sec from `valkey-benchmark -q` output
+- Parses lines like `SET: 123456.78 requests per second` using `awk`
 
 #### Configuration
 
@@ -2906,7 +2936,135 @@ Deployment tests install the chart on a live Kubernetes cluster and verify actua
 - Deploys: `backup.enabled=true`
 - Verifies: CronJob exists, backup PVC exists, manual trigger succeeds, "Backup successful" in logs
 
-### 9.5 Test Execution
+### 9.5 Integration Tests (8 Tests)
+
+Integration tests combine two or more features that are tested in isolation in Phase 2, verifying they work correctly together on a live cluster.
+
+**test_tls_cluster** — TLS encryption in cluster mode
+- Deploys: 6-node cluster with TLS enabled, inter-node TLS replication
+- Verifies: `cluster_state:ok`, 16384 slots assigned, SET/GET over TLS with `-c` flag, `tls-replication yes` in config
+
+**test_tls_sentinel** — TLS encryption in sentinel mode
+- Deploys: 3 data pods + 3 sentinel pods with TLS enabled
+- Verifies: Sentinel finds master via TLS, SET/GET over TLS, `SENTINEL get-master-addr-by-name` works
+
+**test_acl_cluster** — ACL users in cluster mode
+- Deploys: Cluster with ACL enabled, custom user with `~* +@all`
+- Verifies: Default user ping, custom user SET/GET with `-c` flag (handles MOVED), ACL list on all nodes
+
+**test_acl_sentinel** — ACL users in sentinel mode
+- Deploys: Sentinel with ACL enabled, custom user
+- Verifies: Custom user ping/SET/GET on master, ACL replicated to replicas
+
+**test_metrics_tls** — Metrics exporter with TLS
+- Deploys: Standalone with TLS + metrics enabled
+- Verifies: `redis_up 1` on metrics endpoint, exporter uses TLS connection
+
+**test_backup_with_auth** — Backup CronJob with authentication
+- Deploys: Standalone with auth + backup (every minute schedule)
+- Verifies: CronJob triggers, Job completes, backup data written
+
+**test_password_file_cluster** — Password file mounting in cluster mode
+- Deploys: 6-node cluster with `auth.usePasswordFiles=true`
+- Verifies: Password file at `/opt/valkey/secrets/valkey-password`, `cluster_state:ok`, SET/GET works
+
+**test_networkpolicy_cluster** — NetworkPolicy in cluster mode
+- Deploys: 6-node cluster with `networkPolicy.enabled=true`
+- Verifies: Cluster forms correctly despite network policy, 16384 slots assigned, SET/GET works
+
+### 9.6 Performance Tests (6 Tests)
+
+Performance tests establish throughput and latency baselines using `valkey-benchmark`. These tests have conservative thresholds suitable for CI environments.
+
+**test_perf_standalone_throughput** — Baseline standalone throughput
+- Runs: `valkey-benchmark -n 100000 -c 50 -t set,get -q`
+- Threshold: SET > 10k ops/sec, GET > 10k ops/sec
+
+**test_perf_cluster_throughput** — Cluster throughput across nodes
+- Runs: `valkey-benchmark -n 100000 -c 50 --cluster -t set,get -q`
+- Threshold: SET > 5k ops/sec (cluster overhead expected)
+
+**test_perf_pipeline** — Pipeline improvement verification
+- Runs: Benchmark without pipeline, then with `-P 16`
+- Threshold: Pipelined throughput > 2x non-pipelined
+
+**test_perf_large_payload** — Large value handling (1KB, 10KB)
+- Runs: Benchmark with `-d 1024` and `-d 10240`
+- Threshold: Both > 1k ops/sec
+
+**test_perf_connections** — High concurrency
+- Runs: Benchmark with `-c 200` (200 concurrent connections)
+- Threshold: > 5k ops/sec
+
+**test_perf_latency** — Latency baseline
+- Runs: Benchmark with `--csv` for latency parsing
+- Threshold: Average SET latency < 5ms
+
+### 9.7 Resilience Tests (8 Tests)
+
+Resilience tests verify recovery from failure conditions including pod kills, failover, memory pressure, and data preservation across restarts.
+
+**test_resilience_cluster_partial_failure** — Cluster survives single pod kill
+- Process: Deploy 6-node cluster, write data, delete pod-2, wait for recovery
+- Verifies: `cluster_state:ok`, 16384 slots intact, data survived
+
+**test_resilience_cluster_primary_loss** — Auto-promotion on primary loss
+- Process: Identify primary via `role`, write data, delete primary pod
+- Verifies: Cluster auto-promotes replica, `cluster_state:ok`, data survived
+
+**test_resilience_sentinel_quorum_loss** — Sentinel recovers from pod loss
+- Process: Deploy sentinel, verify master discovery, delete 1 sentinel pod
+- Verifies: Sentinel monitoring recovered, data operations still work
+
+**test_resilience_rolling_update_under_load** — No data loss during helm upgrade
+- Process: Deploy 2-replica standalone, write 100 keys, `helm upgrade` with config change
+- Verifies: All 100 keys survived, new config (`hz 50`) applied
+
+**test_resilience_oom_eviction** — Memory pressure with eviction
+- Deploys: `config.maxmemory=2mb, config.maxmemoryPolicy=allkeys-lru`
+- Process: Write ~5MB of data via `valkey-benchmark`
+- Verifies: Server still responds (PONG), eviction occurred (`evicted_keys > 0`)
+
+**test_resilience_rapid_pod_cycling** — Recovery from rapid sequential kills
+- Process: Delete pod 3 times in quick succession
+- Verifies: Pod recovers each time, server responds after all 3 cycles
+
+**test_resilience_pvc_survives_uninstall** — PVC retention across uninstall
+- Deploys: `persistence.keepOnUninstall=true`
+- Process: Write data, BGSAVE, `helm uninstall`, verify PVC exists, reinstall
+- Verifies: Data survived full uninstall/reinstall cycle
+
+**test_resilience_standalone_replica_recovery** — Sentinel replica recovery
+- Deploys: Sentinel mode (3 data + 3 sentinel)
+- Process: Write data on master, delete replica pod, wait for recovery
+- Verifies: Replication re-established, data on replica
+
+### 9.8 Data Integrity Tests (5 Tests)
+
+Data integrity tests verify that data is correctly persisted and recovered under various conditions.
+
+**test_integrity_aof_recovery** — AOF persistence recovery
+- Deploys: Standalone with `appendonly yes, appendfsync everysec`
+- Process: Write 50 keys, wait for sync, delete pod, wait for recovery
+- Verifies: All 50 keys recovered with correct values
+
+**test_integrity_rdb_snapshot** — RDB snapshot correctness
+- Process: Write 50 keys, trigger `BGSAVE`, wait for completion, delete pod
+- Verifies: All 50 keys present after recovery
+
+**test_integrity_cluster_scale_data** — Data intact across cluster scale-up
+- Process: Deploy 6-node cluster, write 200 keys, scale to 8 nodes
+- Verifies: All 200 keys accessible with correct values, `cluster_state:ok`
+
+**test_integrity_large_dataset_persistence** — Bulk data persistence
+- Process: Write 1000 keys via `valkey-cli --pipe`, BGSAVE, delete pod
+- Verifies: `DBSIZE >= 1000`, spot-check 10 random keys
+
+**test_integrity_concurrent_writes** — Concurrent writer consistency
+- Process: 3 parallel `valkey-benchmark` instances writing separate key ranges
+- Verifies: `DBSIZE >= 500`, server healthy after concurrent load
+
+### 9.9 Test Execution
 
 #### Running the Full Suite
 
@@ -2924,12 +3082,24 @@ SKIP_HARDENED=true bash test-chart.sh
 #### Phases
 
 1. **Phase 1 — Static Tests (no cluster required)**
-   - `test_lint()` — All 17+ lint tests
-   - `test_template_render()` — All ~320 template assertions
+   - `test_lint()` — All 28+ lint tests
+   - `test_template_render()` — All ~342 template assertions
 
 2. **Phase 2 — Deployment Tests (requires running cluster)**
    - All 40+ deployment tests run sequentially
    - Each test cleans up before/after via `cleanup()`
+
+3. **Phase 3 — Integration Tests**
+   - 8 tests combining features (TLS+cluster, ACL+sentinel, metrics+TLS, etc.)
+
+4. **Phase 4 — Performance Tests**
+   - 6 tests using `valkey-benchmark` for throughput and latency baselines
+
+5. **Phase 5 — Resilience Tests**
+   - 8 tests verifying recovery from failures (pod kills, OOM, rolling updates)
+
+6. **Phase 6 — Data Integrity Tests**
+   - 5 tests verifying persistence correctness (AOF, RDB, concurrent writes)
 
 #### Summary Output
 
