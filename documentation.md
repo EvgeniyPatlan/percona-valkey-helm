@@ -428,6 +428,19 @@ When `auth.usePasswordFiles: true`:
 - Sentinel probes also use file-based password when `usePasswordFiles` is enabled
 - More secure than environment variables (not visible in `kubectl describe pod`)
 
+**Startup command behavior with password files:**
+
+The Docker entrypoint only handles `VALKEY_PASSWORD` (not `VALKEY_PASSWORD_FILE`), so the chart uses explicit `command:` overrides for password file mode:
+
+| Mode | Without `usePasswordFiles` | With `usePasswordFiles` |
+|------|---------------------------|------------------------|
+| Standalone | `args: [/etc/valkey/valkey.conf]` (entrypoint sets `--requirepass` from `$VALKEY_PASSWORD`) | `command: [sh, -c, ...]` reads password file, sets `--requirepass` and `--masterauth` |
+| Cluster (no ext. access) | `args: [/etc/valkey/valkey.conf]` (entrypoint sets `--requirepass`) | `command: [sh, -c, ...]` reads password file, sets `--requirepass`, `--masterauth`, and `--cluster-announce-ip` |
+| Cluster + ext. access | `command: [sh, -c, ...]` with `$VALKEY_PASSWORD` env var | `command: [sh, -c, ...]` reads password file |
+| Sentinel | `command: [sh, -c, ...]` with `$VALKEY_PASSWORD` env var | `command: [sh, -c, ...]` reads password file |
+
+All `command:` overrides for password file mode read the password with `PASS=$(cat <path>/valkey-password)` and pass it as `--requirepass $PASS --masterauth $PASS` (or appropriate ACL flags when ACL is enabled).
+
 #### Configuration
 
 | Parameter | Default | Description |
@@ -2169,14 +2182,19 @@ kubectl exec <release>-sentinel-0 -- valkey-cli -p 26379 -a "$PASS" \
 # 1. Increase replicas (e.g., 6 -> 8)
 helm upgrade my-valkey ./helm/percona-valkey \
   --set mode=cluster \
-  --set cluster.replicas=8
+  --set cluster.replicas=8 \
+  --timeout 900s
 
 # 2. The cluster-scale Job (post-upgrade hook) automatically:
-#    - Waits for new pods
-#    - Adds them to cluster
-#    - Converts excess masters to replicas
-#    - Rebalances hash slots
+#    - Waits for new pods (up to 120s per pod)
+#    - Resets new node cluster state (`cluster reset soft`) for clean join
+#    - Adds them to cluster via `--cluster add-node`
+#    - Falls back to `cluster meet` if add-node fails
+#    - Converts excess masters to replicas (`cluster replicate`)
+#    - Rebalances hash slots (`--cluster rebalance --cluster-use-empty-masters`)
 ```
+
+**Note:** Use `--timeout 900s` (or longer) for scale-up operations. The scale job needs time for new pods to start, be added to the cluster, and for slot rebalancing to complete. The default 300s timeout may be insufficient.
 
 #### Cluster Scale-Down
 
@@ -2393,6 +2411,13 @@ test-chart.sh
 **`parse_ops_sec()`**
 - Piped filter that extracts ops/sec from `valkey-benchmark -q` output
 - Parses lines like `SET: 123456.78 requests per second` using `awk`
+
+**`run_benchmark(release, extra-args...)`**
+- Executes `valkey-benchmark` on the first data pod (`<release>-percona-valkey-0`) via `kubectl exec`
+- Pipes output through `tr '\r' '\n'` to convert carriage-return progress indicators into separate lines (valkey-benchmark uses `\r` to overwrite progress in-place, which contaminates output parsing when captured in a variable)
+- Automatically passes `-a "$PASS"` for authentication
+- Returns benchmark output on stdout; callers capture with `$(run_benchmark ...)`
+- Errors suppressed with `2>/dev/null || true` to prevent `set -e` from killing the test script
 
 #### Configuration
 
@@ -2976,6 +3001,8 @@ Integration tests combine two or more features that are tested in isolation in P
 
 Performance tests establish throughput and latency baselines using `valkey-benchmark`. These tests have conservative thresholds suitable for CI environments.
 
+**Benchmark execution:** All performance tests use the `run_benchmark()` helper, which executes `valkey-benchmark` on the first data pod via `kubectl exec`. The output is piped through `tr '\r' '\n'` to convert carriage-return progress indicators into separate lines, then parsed with `grep "SET:.*requests per second" | parse_ops_sec` to extract the final ops/sec value.
+
 **test_perf_standalone_throughput** — Baseline standalone throughput
 - Runs: `valkey-benchmark -n 100000 -c 50 -t set,get -q`
 - Threshold: SET > 10k ops/sec, GET > 10k ops/sec
@@ -3162,6 +3189,33 @@ kubectl logs job/<release>-cluster-init
 3. **Network policy blocking** — Ensure NetworkPolicy allows port 6379 and 16379 between pods.
 4. **Existing cluster state** — If pods have stale `nodes.conf` from a previous installation, delete the PVCs and retry.
 
+### Cluster Scale-Up Job Failing
+
+**Symptoms:** `helm upgrade` with increased `cluster.replicas` fails with "post-upgrade hooks failed: timed out".
+
+**Diagnosis:**
+```bash
+kubectl logs job/<release>-cluster-scale
+```
+
+**Common causes:**
+1. **Insufficient timeout** — Scale-up involves pod startup, `cluster add-node`, replica assignment, and slot rebalancing. Use `--timeout 900s` or longer.
+2. **New pods slow to start** — The scale job waits up to 120s per pod. If image pull or storage provisioning is slow, pods may be skipped. The job retries via `backoffLimit: 3`.
+3. **Stale cluster state on new nodes** — The scale job runs `cluster reset soft` on new nodes before adding them to clear any residual cluster configuration from previous attempts.
+4. **`add-node` failure** — If `--cluster add-node` fails (e.g., node already knows other nodes), the job falls back to `cluster meet` to join the node via gossip protocol.
+
+**Manual recovery** (if scale job repeatedly fails):
+```bash
+# Check cluster status
+kubectl exec <release>-0 -- valkey-cli -a <pass> cluster nodes
+
+# Manually add a node
+kubectl exec <release>-0 -- valkey-cli -a <pass> cluster meet <new-pod-ip> 6379
+
+# Manually rebalance
+kubectl exec <release>-0 -- valkey-cli -a <pass> --cluster rebalance <host>:6379 --cluster-use-empty-masters
+```
+
 ### Permission Denied (Read-Only Root Filesystem)
 
 **Symptoms:** `Read-only file system` errors in pod logs.
@@ -3215,6 +3269,10 @@ Scaling down a Valkey Cluster requires that:
 - At least 3 masters remain after scale-down
 - Each master being removed has a healthy replica for failover
 - The precheck Job validates these conditions, but manual intervention may be needed if the cluster is in a degraded state
+
+### Docker Entrypoint Does Not Handle `VALKEY_PASSWORD_FILE`
+
+The Docker entrypoint (`docker-entrypoint.sh`) only handles the `VALKEY_PASSWORD` environment variable (setting `--requirepass`). It does **not** read `VALKEY_PASSWORD_FILE`. When `auth.usePasswordFiles: true`, the chart works around this by using explicit `command:` overrides that read the password file and pass `--requirepass` and `--masterauth` on the command line. This applies to all modes (standalone, cluster, sentinel).
 
 ### Jobs Always Use RPM Image
 

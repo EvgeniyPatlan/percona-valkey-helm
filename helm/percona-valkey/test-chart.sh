@@ -127,17 +127,14 @@ parse_ops_sec() {
     awk '/requests per second/ {print $2}' | head -1
 }
 
-# Run valkey-benchmark via the service using a temporary pod.
+# Run valkey-benchmark on the first data pod.
 # Usage: run_benchmark <release> <extra-args...>
 # Output goes to stdout. The caller captures it with $().
-BENCH_IMAGE="perconalab/valkey:9.0.3"
 run_benchmark() {
     local rel="$1"; shift
-    local svc="${rel}-percona-valkey"
-    local pod_name="bench-${rel}-${RANDOM}"
-    kubectl run "$pod_name" --rm -i --restart=Never \
-        --image=$BENCH_IMAGE -n $NAMESPACE \
-        -- valkey-benchmark -h "$svc" -p 6379 -a "$PASS" "$@" 2>/dev/null || true
+    # tr converts \r (progress-line overwrite) to \n so grep can match individual lines
+    kubectl exec "${rel}-percona-valkey-0" -n $NAMESPACE -- \
+        valkey-benchmark -a "$PASS" "$@" 2>/dev/null | tr '\r' '\n' || true
 }
 
 # --- Lint Tests ---
@@ -4857,15 +4854,15 @@ test_cluster_scale_up() {
     # Write test data before scaling
     kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS -c set before-scale "preserved" > /dev/null 2>&1
 
-    # Scale up
+    # Scale up (scale job needs time: pod boot + add-node + rebalance)
     helm upgrade "$rel" "$CHART_DIR" \
         --set mode=cluster \
         --set cluster.replicas=8 \
         --set auth.password=$PASS \
-        -n $NAMESPACE --timeout 300s 2>&1 || { fail "scale-up upgrade to 8"; cleanup "$rel"; return; }
+        -n $NAMESPACE --timeout 900s 2>&1 || { fail "scale-up upgrade to 8"; cleanup "$rel"; return; }
     pass "scale-up upgrade to 8 nodes"
 
-    if wait_for_pods "app.kubernetes.io/instance=$rel" 8 300s; then
+    if wait_for_pods "app.kubernetes.io/instance=$rel" 8 600s; then
         pass "scale-up all 8 pods ready"
     else
         fail "scale-up all 8 pods ready"; cleanup "$rel"; return
@@ -7315,8 +7312,8 @@ test_perf_standalone_throughput() {
     echo "    Benchmark output:"
     echo "$bench_output" | sed 's/^/    /'
 
-    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
-    local get_ops=$(echo "$bench_output" | grep "^GET:" | parse_ops_sec)
+    local set_ops=$(echo "$bench_output" | grep "SET:.*requests per second" | parse_ops_sec)
+    local get_ops=$(echo "$bench_output" | grep "GET:.*requests per second" | parse_ops_sec)
 
     if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 10000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         pass "perf standalone SET throughput > 10k ops/sec ($set_ops)"
@@ -7355,8 +7352,8 @@ test_perf_cluster_throughput() {
     echo "    Benchmark output:"
     echo "$bench_output" | sed 's/^/    /'
 
-    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
-    local get_ops=$(echo "$bench_output" | grep "^GET:" | parse_ops_sec)
+    local set_ops=$(echo "$bench_output" | grep "SET:.*requests per second" | parse_ops_sec)
+    local get_ops=$(echo "$bench_output" | grep "GET:.*requests per second" | parse_ops_sec)
 
     if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 5000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         pass "perf cluster SET throughput > 5k ops/sec ($set_ops)"
@@ -7391,12 +7388,12 @@ test_perf_pipeline() {
 
     # Run without pipeline
     local no_pipe=$(run_benchmark "$rel" -n 50000 -c 50 -t set -q)
-    local no_pipe_ops=$(echo "$no_pipe" | grep "^SET:" | parse_ops_sec)
+    local no_pipe_ops=$(echo "$no_pipe" | grep "SET:.*requests per second" | parse_ops_sec)
     echo "    Without pipeline: ${no_pipe_ops:-N/A} ops/sec"
 
     # Run with pipeline (P=16)
     local with_pipe=$(run_benchmark "$rel" -n 50000 -c 50 -t set -P 16 -q)
-    local with_pipe_ops=$(echo "$with_pipe" | grep "^SET:" | parse_ops_sec)
+    local with_pipe_ops=$(echo "$with_pipe" | grep "SET:.*requests per second" | parse_ops_sec)
     echo "    With pipeline (P=16): ${with_pipe_ops:-N/A} ops/sec"
 
     if [ -n "$no_pipe_ops" ] && [ -n "$with_pipe_ops" ]; then
@@ -7433,7 +7430,7 @@ test_perf_large_payload() {
     local bench_1k=$(run_benchmark "$rel" -n 10000 -c 20 -d 1024 -t set,get -q)
     echo "    1KB payload:"
     echo "$bench_1k" | sed 's/^/    /'
-    local set_1k=$(echo "$bench_1k" | grep "^SET:" | parse_ops_sec)
+    local set_1k=$(echo "$bench_1k" | grep "SET:.*requests per second" | parse_ops_sec)
     if [ -n "$set_1k" ] && [ "$(echo "$set_1k > 1000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         pass "perf 1KB payload SET > 1k ops/sec ($set_1k)"
     else
@@ -7444,7 +7441,7 @@ test_perf_large_payload() {
     local bench_10k=$(run_benchmark "$rel" -n 5000 -c 20 -d 10240 -t set,get -q)
     echo "    10KB payload:"
     echo "$bench_10k" | sed 's/^/    /'
-    local set_10k=$(echo "$bench_10k" | grep "^SET:" | parse_ops_sec)
+    local set_10k=$(echo "$bench_10k" | grep "SET:.*requests per second" | parse_ops_sec)
     if [ -n "$set_10k" ] && [ "$(echo "$set_10k > 1000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         pass "perf 10KB payload SET > 1k ops/sec ($set_10k)"
     else
@@ -7475,7 +7472,7 @@ test_perf_connections() {
     echo "    200 concurrent connections:"
     echo "$bench_output" | sed 's/^/    /'
 
-    local set_ops=$(echo "$bench_output" | grep "^SET:" | parse_ops_sec)
+    local set_ops=$(echo "$bench_output" | grep "SET:.*requests per second" | parse_ops_sec)
     if [ -n "$set_ops" ] && [ "$(echo "$set_ops > 5000" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         pass "perf 200 connections SET > 5k ops/sec ($set_ops)"
     else

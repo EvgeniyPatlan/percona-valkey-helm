@@ -1462,6 +1462,17 @@ kubectl describe pod <release-name>-percona-valkey-0
 kubectl get pvc -l app.kubernetes.io/instance=<release-name>
 ```
 
+### Cluster scale-up failing with timeout
+
+The cluster-scale Job needs time for new pods to start, join the cluster, and rebalance slots. Use `--timeout 900s` or longer:
+
+```bash
+helm upgrade my-valkey ./helm/percona-valkey \
+  --set mode=cluster --set cluster.replicas=8 --timeout 900s
+```
+
+Check the scale Job logs for details: `kubectl logs job/<release>-percona-valkey-cluster-scale`
+
 ### Permission denied errors with hardened image
 
 The hardened variant runs with `readOnlyRootFilesystem: true`. Ensure that all writable paths (`/data`, `/tmp`, `/run/valkey`) have proper volume mounts. If Valkey tries to write to an unexpected path, check `config.customConfig` for directives that reference non-mounted directories.

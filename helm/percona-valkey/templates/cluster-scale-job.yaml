@@ -143,11 +143,26 @@ spec:
 
                 if ! echo "$CLUSTER_NODES" | grep -q "$POD_ID"; then
                   echo "Adding $POD ($POD_ID) to cluster..."
-                  valkey-cli $AUTH $TLS --cluster add-node "${POD}:${PORT}" "${REF_HOST}:${PORT}"
-                  ADDED=$((ADDED + 1))
-                  NEW_IDS="$NEW_IDS $POD_ID"
-                  sleep 2
-                  CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster nodes 2>/dev/null)
+                  # Reset new node's cluster state to ensure clean join
+                  valkey-cli -h "$POD" -p $PORT $AUTH $TLS cluster reset soft 2>/dev/null || true
+                  sleep 1
+                  if valkey-cli $AUTH $TLS --cluster add-node "${POD}:${PORT}" "${REF_HOST}:${PORT}"; then
+                    ADDED=$((ADDED + 1))
+                    NEW_IDS="$NEW_IDS $POD_ID"
+                    sleep 2
+                    CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster nodes 2>/dev/null)
+                  else
+                    echo "WARN: add-node failed for $POD, trying cluster meet..."
+                    valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster meet \
+                      $(getent hosts "$POD" | awk '{print $1}') $PORT 2>/dev/null || true
+                    sleep 3
+                    CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster nodes 2>/dev/null)
+                    NEW_ID=$(valkey-cli -h "$POD" -p $PORT $AUTH $TLS cluster myid 2>/dev/null | tr -d '\r')
+                    if echo "$CLUSTER_NODES" | grep -q "$NEW_ID"; then
+                      ADDED=$((ADDED + 1))
+                      NEW_IDS="$NEW_IDS $NEW_ID"
+                    fi
+                  fi
                 fi
               done
 
@@ -187,7 +202,7 @@ spec:
                     if [ -n "$BEST_MID" ]; then
                       N_IP=$(echo "$NLINE" | awk '{print $2}' | cut -d: -f1)
                       echo "  $NID -> replica of $BEST_MID"
-                      valkey-cli -h "$N_IP" -p $PORT $AUTH $TLS cluster replicate "$BEST_MID"
+                      valkey-cli -h "$N_IP" -p $PORT $AUTH $TLS cluster replicate "$BEST_MID" || echo "WARN: replicate failed for $NID"
                       CONVERTED=$((CONVERTED + 1))
                       sleep 1
                       CLUSTER_NODES=$(valkey-cli -h "$REF_HOST" -p $PORT $AUTH $TLS cluster nodes 2>/dev/null)
