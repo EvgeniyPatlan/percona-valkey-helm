@@ -127,6 +127,19 @@ parse_ops_sec() {
     awk '/requests per second/ {print $2}' | head -1
 }
 
+# Run valkey-benchmark via the service using a temporary pod.
+# Usage: run_benchmark <release> <extra-args...>
+# Output goes to stdout. The caller captures it with $().
+BENCH_IMAGE="perconalab/valkey:9.0.3"
+run_benchmark() {
+    local rel="$1"; shift
+    local svc="${rel}-percona-valkey"
+    local pod_name="bench-${rel}-${RANDOM}"
+    kubectl run "$pod_name" --rm -i --restart=Never \
+        --image=$BENCH_IMAGE -n $NAMESPACE \
+        -- valkey-benchmark -h "$svc" -p 6379 -a "$PASS" "$@" 2>/dev/null || true
+}
+
 # --- Lint Tests ---
 
 test_lint() {
@@ -7297,8 +7310,8 @@ test_perf_standalone_throughput() {
         fail "perf standalone pod ready"; cleanup "$rel"; return
     fi
 
-    # Run benchmark
-    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 100000 -c 50 -t set,get -q 2>/dev/null)
+    # Run benchmark via temporary pod against the service
+    local bench_output=$(run_benchmark "$rel" -n 100000 -c 50 -t set,get -q)
     echo "    Benchmark output:"
     echo "$bench_output" | sed 's/^/    /'
 
@@ -7337,8 +7350,8 @@ test_perf_cluster_throughput() {
         fail "perf cluster 6 pods ready"; cleanup "$rel"; return
     fi
 
-    # Run benchmark with cluster flag
-    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 100000 -c 50 --cluster -t set,get -q 2>/dev/null)
+    # Run benchmark via temporary pod against the service (cluster mode)
+    local bench_output=$(run_benchmark "$rel" -n 100000 -c 50 --cluster -t set,get -q)
     echo "    Benchmark output:"
     echo "$bench_output" | sed 's/^/    /'
 
@@ -7377,12 +7390,12 @@ test_perf_pipeline() {
     fi
 
     # Run without pipeline
-    local no_pipe=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 50 -t set -q 2>/dev/null)
+    local no_pipe=$(run_benchmark "$rel" -n 50000 -c 50 -t set -q)
     local no_pipe_ops=$(echo "$no_pipe" | grep "^SET:" | parse_ops_sec)
     echo "    Without pipeline: ${no_pipe_ops:-N/A} ops/sec"
 
     # Run with pipeline (P=16)
-    local with_pipe=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 50 -t set -P 16 -q 2>/dev/null)
+    local with_pipe=$(run_benchmark "$rel" -n 50000 -c 50 -t set -P 16 -q)
     local with_pipe_ops=$(echo "$with_pipe" | grep "^SET:" | parse_ops_sec)
     echo "    With pipeline (P=16): ${with_pipe_ops:-N/A} ops/sec"
 
@@ -7417,7 +7430,7 @@ test_perf_large_payload() {
     fi
 
     # 1KB values
-    local bench_1k=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 10000 -c 20 -d 1024 -t set,get -q 2>/dev/null)
+    local bench_1k=$(run_benchmark "$rel" -n 10000 -c 20 -d 1024 -t set,get -q)
     echo "    1KB payload:"
     echo "$bench_1k" | sed 's/^/    /'
     local set_1k=$(echo "$bench_1k" | grep "^SET:" | parse_ops_sec)
@@ -7428,7 +7441,7 @@ test_perf_large_payload() {
     fi
 
     # 10KB values
-    local bench_10k=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -c 20 -d 10240 -t set,get -q 2>/dev/null)
+    local bench_10k=$(run_benchmark "$rel" -n 5000 -c 20 -d 10240 -t set,get -q)
     echo "    10KB payload:"
     echo "$bench_10k" | sed 's/^/    /'
     local set_10k=$(echo "$bench_10k" | grep "^SET:" | parse_ops_sec)
@@ -7458,7 +7471,7 @@ test_perf_connections() {
     fi
 
     # Run with 200 concurrent connections
-    local bench_output=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 50000 -c 200 -t set,get -q 2>/dev/null)
+    local bench_output=$(run_benchmark "$rel" -n 50000 -c 200 -t set,get -q)
     echo "    200 concurrent connections:"
     echo "$bench_output" | sed 's/^/    /'
 
@@ -7496,7 +7509,7 @@ test_perf_latency() {
     fi
 
     # Run benchmark with CSV output for latency parsing
-    local bench_csv=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 10000 -c 10 -t set --csv 2>/dev/null)
+    local bench_csv=$(run_benchmark "$rel" -n 10000 -c 10 -t set --csv)
     echo "    CSV output:"
     echo "$bench_csv" | sed 's/^/    /'
 
@@ -7821,7 +7834,7 @@ test_resilience_oom_eviction() {
     fi
 
     # Write enough data to exceed 2MB maxmemory (5000 keys * 1KB = ~5MB)
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 5000 -r 5000 -d 1024 -t set -q > /dev/null 2>&1 || true
+    run_benchmark "$rel" -n 5000 -r 5000 -d 1024 -t set -q > /dev/null 2>&1
 
     # Verify server still responds
     if kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS ping 2>/dev/null | grep -q PONG; then
@@ -8193,12 +8206,12 @@ test_integrity_cluster_scale_data() {
     done
     pass "integrity cluster scale wrote 200 keys"
 
-    # Scale to 8 nodes
+    # Scale to 8 nodes (scale job needs time: pods may need image pull + cluster join + rebalance)
     helm upgrade "$rel" "$CHART_DIR" \
         --set mode=cluster \
         --set auth.password=$PASS \
         --set cluster.replicas=8 \
-        -n $NAMESPACE --timeout 600s 2>&1 || { fail "integrity cluster scale upgrade to 8 nodes"; cleanup "$rel"; return; }
+        -n $NAMESPACE --timeout 900s 2>&1 || { fail "integrity cluster scale upgrade to 8 nodes"; cleanup "$rel"; return; }
     pass "integrity cluster scale upgrade initiated"
 
     if wait_for_pods "app.kubernetes.io/instance=$rel" 8 600s; then
@@ -8207,8 +8220,8 @@ test_integrity_cluster_scale_data() {
         fail "integrity cluster scale 8 pods ready"; cleanup "$rel"; return
     fi
 
-    # Wait for cluster stabilization
-    sleep 10
+    # Wait for cluster stabilization after rebalance
+    sleep 20
 
     # Verify cluster state ok
     local state=$(kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-cli -a $PASS cluster info 2>/dev/null | grep cluster_state | tr -d '\r')
@@ -8317,11 +8330,11 @@ test_integrity_concurrent_writes() {
     fi
 
     # Run 3 parallel valkey-benchmark instances writing to separate key ranges
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    run_benchmark "$rel" -n 1000 -c 10 -t set -r 1000 -q > /dev/null 2>&1 &
     local pid1=$!
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    run_benchmark "$rel" -n 1000 -c 10 -t set -r 1000 -q > /dev/null 2>&1 &
     local pid2=$!
-    kubectl exec ${rel}-percona-valkey-0 -n $NAMESPACE -- valkey-benchmark -a $PASS -n 1000 -c 10 -t set -r 1000 --csv -q 2>/dev/null &
+    run_benchmark "$rel" -n 1000 -c 10 -t set -r 1000 -q > /dev/null 2>&1 &
     local pid3=$!
 
     # Wait for all to complete
